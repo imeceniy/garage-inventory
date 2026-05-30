@@ -155,6 +155,14 @@ function recordHistory(item, amount, action) {
   `).run(crypto.randomUUID(), item.id, item.name, amount, item.quantity, action, nowIso());
 }
 
+function replaceLocation(list, from, to) {
+  const normalizedFrom = normalizeText(from);
+  const normalizedTo = normalizeText(to);
+  return list
+    .map((entry) => (entry === normalizedFrom ? normalizedTo : entry))
+    .filter(Boolean);
+}
+
 function readToken(req) {
   const header = req.get('authorization') || '';
   return header.startsWith('Bearer ') ? header.slice(7) : '';
@@ -252,6 +260,84 @@ app.get('/api/items', requireAuth, (_req, res) => {
 app.get('/api/history', requireAuth, (_req, res) => {
   const rows = db.prepare('SELECT * FROM history ORDER BY createdAt DESC LIMIT 200').all();
   res.json(rows.map(toHistory));
+});
+
+app.get('/api/items/:id/history', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM history WHERE itemId = ? ORDER BY createdAt DESC').all(req.params.id);
+  res.json(rows.map(toHistory));
+});
+
+app.get('/api/meta', requireAuth, (_req, res) => {
+  const items = db.prepare('SELECT locations, location, project FROM items').all().map(toItem);
+  const locations = new Set();
+  const projects = new Set();
+
+  for (const item of items) {
+    for (const location of item.locations) locations.add(location);
+    if (item.project) projects.add(item.project);
+  }
+
+  res.json({
+    locations: Array.from(locations).sort((a, b) => a.localeCompare(b, 'ru')),
+    projects: Array.from(projects).sort((a, b) => a.localeCompare(b, 'ru'))
+  });
+});
+
+app.post('/api/meta/rename', requireAuth, (req, res) => {
+  const type = req.body?.type;
+  const from = normalizeText(req.body?.from);
+  const to = normalizeText(req.body?.to);
+
+  if (!['location', 'project'].includes(type) || !from || !to) {
+    res.status(400).json({ error: 'Некорректное переименование' });
+    return;
+  }
+
+  const timestamp = nowIso();
+  const rows = db.prepare('SELECT * FROM items').all();
+  const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, updatedAt = ? WHERE id = ?');
+
+  for (const row of rows) {
+    const item = toItem(row);
+    if (type === 'project' && item.project === from) {
+      update.run(item.location, JSON.stringify(item.locations), to, timestamp, item.id);
+    }
+
+    if (type === 'location' && item.locations.includes(from)) {
+      const locations = replaceLocation(item.locations, from, to);
+      update.run(locations[0] || '', JSON.stringify(locations), item.project, timestamp, item.id);
+    }
+  }
+
+  res.json({ ok: true });
+});
+
+app.post('/api/meta/delete', requireAuth, (req, res) => {
+  const type = req.body?.type;
+  const value = normalizeText(req.body?.value);
+
+  if (!['location', 'project'].includes(type) || !value) {
+    res.status(400).json({ error: 'Некорректное удаление' });
+    return;
+  }
+
+  const timestamp = nowIso();
+  const rows = db.prepare('SELECT * FROM items').all();
+  const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, updatedAt = ? WHERE id = ?');
+
+  for (const row of rows) {
+    const item = toItem(row);
+    if (type === 'project' && item.project === value) {
+      update.run(item.location, JSON.stringify(item.locations), '', timestamp, item.id);
+    }
+
+    if (type === 'location' && item.locations.includes(value)) {
+      const locations = item.locations.filter((entry) => entry !== value);
+      update.run(locations[0] || '', JSON.stringify(locations), item.project, timestamp, item.id);
+    }
+  }
+
+  res.json({ ok: true });
 });
 
 app.post('/api/items', requireAuth, (req, res) => {

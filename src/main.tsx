@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   AlertTriangle,
+  ArrowUpDown,
   Barcode,
   Boxes,
   Camera,
@@ -17,9 +18,13 @@ import {
   PackagePlus,
   Plus,
   Printer,
+  Rows3,
   Search,
+  Settings,
+  Square,
   Sun,
   Trash2,
+  Undo2,
   X
 } from 'lucide-react';
 import './styles.css';
@@ -52,6 +57,11 @@ type HistoryEntry = {
 };
 
 type Draft = Omit<Item, 'id' | 'createdAt' | 'updatedAt'>;
+type ViewMode = 'cards' | 'list';
+type SortMode = 'name' | 'quantity' | 'low' | 'updated' | 'location';
+type MetaType = 'location' | 'project';
+type UndoAction = { message: string; run: () => Promise<void> };
+type MetaState = { locations: string[]; projects: string[] };
 
 const emptyDraft: Draft = {
   name: '',
@@ -94,6 +104,36 @@ function parseLocations(value: string) {
     .filter(Boolean);
 }
 
+function itemLocations(item: Pick<Item, 'location' | 'locations'>) {
+  return item.locations.length ? item.locations : item.location ? [item.location] : [];
+}
+
+async function compressImage(file: File) {
+  const image = new Image();
+  const url = URL.createObjectURL(file);
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = reject;
+      image.src = url;
+    });
+
+    const maxSide = 1200;
+    const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.width * ratio));
+    canvas.height = Math.max(1, Math.round(image.height * ratio));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Не удалось обработать фото');
+
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.82);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function formatNumber(value: number) {
   return value.toLocaleString('ru-RU');
 }
@@ -114,27 +154,109 @@ function actionLabel(entry: HistoryEntry) {
   return entry.amount > 0 ? 'добавлено' : 'списано';
 }
 
+function sortItems(items: Item[], sort: SortMode) {
+  return [...items].sort((a, b) => {
+    if (sort === 'quantity') return a.quantity - b.quantity || a.name.localeCompare(b.name, 'ru');
+    if (sort === 'low') return a.quantity - a.minQuantity - (b.quantity - b.minQuantity) || a.name.localeCompare(b.name, 'ru');
+    if (sort === 'updated') return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    if (sort === 'location') return (itemLocations(a)[0] || '').localeCompare(itemLocations(b)[0] || '', 'ru');
+    return a.name.localeCompare(b.name, 'ru');
+  });
+}
+
 function App() {
   // UI state is kept local; the server remains the source of truth for items.
   const [token, setToken] = useState(() => localStorage.getItem(tokenKey) || '');
   const [password, setPassword] = useState('');
   const [items, setItems] = useState<Item[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [meta, setMeta] = useState<MetaState>({ locations: [], projects: [] });
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('Все');
   const [project, setProject] = useState('Все');
+  const [location, setLocation] = useState('Все');
   const [onlyLow, setOnlyLow] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('cards');
+  const [sortMode, setSortMode] = useState<SortMode>('name');
+  const [adjustBy, setAdjustBy] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [itemHistory, setItemHistory] = useState<HistoryEntry[]>([]);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false);
+  const [scannerMode, setScannerMode] = useState<'search' | 'draft' | null>(null);
+  const [undo, setUndo] = useState<UndoAction | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [theme, setTheme] = useState(() => localStorage.getItem(themeKey) || 'light');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const scannerDoneRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(themeKey, theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!undo) return;
+    const timer = window.setTimeout(() => setUndo(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [undo]);
+
+  useEffect(() => {
+    if (!scannerMode) return;
+
+    const Detector = (window as unknown as { BarcodeDetector?: new (options?: { formats?: string[] }) => { detect: (source: HTMLVideoElement) => Promise<Array<{ rawValue: string }>> } }).BarcodeDetector;
+    if (!Detector) {
+      setError('Сканер кодов не поддерживается этим браузером');
+      setScannerMode(null);
+      return;
+    }
+
+    scannerDoneRef.current = false;
+    const detector = new Detector({ formats: ['qr_code', 'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e'] });
+    let stream: MediaStream | null = null;
+    let frame = 0;
+
+    async function startScanner() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        if (!videoRef.current) return;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+
+        const scan = async () => {
+          if (!videoRef.current || scannerDoneRef.current) return;
+          const codes = await detector.detect(videoRef.current).catch(() => []);
+          const value = codes[0]?.rawValue;
+          if (value) {
+            scannerDoneRef.current = true;
+            if (scannerMode === 'draft') {
+              setDraft((current) => ({ ...current, barcode: value }));
+            } else {
+              setQuery(value);
+            }
+            setScannerMode(null);
+            return;
+          }
+          frame = window.requestAnimationFrame(scan);
+        };
+
+        frame = window.requestAnimationFrame(scan);
+      } catch {
+        setError('Не удалось открыть камеру');
+        setScannerMode(null);
+      }
+    }
+
+    startScanner();
+
+    return () => {
+      scannerDoneRef.current = true;
+      window.cancelAnimationFrame(frame);
+      stream?.getTracks().forEach((track) => track.stop());
+    };
+  }, [scannerMode]);
 
   // Shared API wrapper handles auth expiry and consistent error messages.
   async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -170,12 +292,14 @@ function App() {
     if (!token) return;
     setError('');
     try {
-      const [nextItems, nextHistory] = await Promise.all([
+      const [nextItems, nextHistory, nextMeta] = await Promise.all([
         request<Item[]>('/api/items'),
-        request<HistoryEntry[]>('/api/history')
+        request<HistoryEntry[]>('/api/history'),
+        request<MetaState>('/api/meta')
       ]);
       setItems(nextItems);
       setHistory(nextHistory);
+      setMeta(nextMeta);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить данные');
     }
@@ -216,19 +340,27 @@ function App() {
     setToken('');
     setItems([]);
     setHistory([]);
+    setMeta({ locations: [], projects: [] });
   }
 
   function startCreate() {
     setDraft(emptyDraft);
     setEditingId(null);
+    setItemHistory([]);
     setPanelOpen(true);
   }
 
-  function startEdit(item: Item) {
+  async function startEdit(item: Item) {
     const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...rest } = item;
     setDraft(rest);
     setEditingId(item.id);
+    setItemHistory([]);
     setPanelOpen(true);
+    try {
+      setItemHistory(await request<HistoryEntry[]>(`/api/items/${item.id}/history`));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить историю позиции');
+    }
   }
 
   async function imageToDraft(file: File | undefined) {
@@ -243,9 +375,12 @@ function App() {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => setDraft((current) => ({ ...current, photo: String(reader.result || '') }));
-    reader.readAsDataURL(file);
+    try {
+      const photo = await compressImage(file);
+      setDraft((current) => ({ ...current, photo }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось обработать фото');
+    }
   }
 
   // Create and update share the same drawer form and local refresh path.
@@ -280,7 +415,7 @@ function App() {
   }
 
   // Fast quantity changes are applied through a dedicated API route.
-  async function adjustItem(item: Item, amount: number) {
+  async function adjustItem(item: Item, amount: number, createUndo = true) {
     try {
       const updated = await request<Item>(`/api/items/${item.id}/adjust`, {
         method: 'POST',
@@ -288,9 +423,24 @@ function App() {
       });
       setItems((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)));
       setHistory(await request<HistoryEntry[]>('/api/history'));
+      if (createUndo && updated.quantity !== item.quantity) {
+        const actualDelta = updated.quantity - item.quantity;
+        setUndo({
+          message: `${actualDelta > 0 ? 'Добавлено' : 'Списано'} ${formatNumber(Math.abs(actualDelta))} ${item.unit}: ${item.name}`,
+          run: () => adjustItem(updated, -actualDelta, false)
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось изменить количество');
     }
+  }
+
+  async function duplicateItem(item: Item) {
+    const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...copy } = item;
+    setDraft({ ...copy, name: `${item.name} копия`, quantity: 0 });
+    setEditingId(null);
+    setItemHistory([]);
+    setPanelOpen(true);
   }
 
   async function deleteItem(item: Item) {
@@ -301,26 +451,56 @@ function App() {
       await request(`/api/items/${item.id}`, { method: 'DELETE' });
       setItems((current) => current.filter((entry) => entry.id !== item.id));
       setHistory((current) => current.filter((entry) => entry.itemId !== item.id));
+      setUndo({
+        message: `Удалено: ${item.name}`,
+        run: async () => {
+          const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...restore } = item;
+          await request<Item>('/api/items', { method: 'POST', body: JSON.stringify(restore) });
+          await loadData();
+        }
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось удалить');
     }
   }
 
+  async function renameMeta(type: MetaType, from: string, to: string) {
+    await request('/api/meta/rename', {
+      method: 'POST',
+      body: JSON.stringify({ type, from, to })
+    });
+    await loadData();
+  }
+
+  async function deleteMeta(type: MetaType, value: string) {
+    await request('/api/meta/delete', {
+      method: 'POST',
+      body: JSON.stringify({ type, value })
+    });
+    await loadData();
+  }
+
   const projects = useMemo(() => {
     const dynamic = items.map((item) => item.project).filter(Boolean);
-    return Array.from(new Set([...defaultProjects, ...dynamic]));
-  }, [items]);
+    return Array.from(new Set([...defaultProjects, ...meta.projects, ...dynamic])).sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [items, meta.projects]);
+
+  const locations = useMemo(() => {
+    const dynamic = items.flatMap(itemLocations);
+    return Array.from(new Set([...meta.locations, ...dynamic])).sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [items, meta.locations]);
 
   // Filtering stays client-side because the inventory is expected to be small.
   const filteredItems = useMemo(() => {
     const search = query.trim().toLowerCase();
-    return items.filter((item) => {
+    const filtered = items.filter((item) => {
       const low = item.quantity <= item.minQuantity;
+      const locations = itemLocations(item);
       const haystack = [
         item.name,
         item.category,
         item.location,
-        item.locations.join(' '),
+        locations.join(' '),
         item.barcode,
         item.project,
         item.note
@@ -330,10 +510,12 @@ function App() {
       const textMatch = haystack.includes(search);
       const categoryMatch = category === 'Все' || item.category === category;
       const projectMatch = project === 'Все' || item.project === project;
+      const locationMatch = location === 'Все' || locations.includes(location);
       const stockMatch = !onlyLow || low;
-      return textMatch && categoryMatch && projectMatch && stockMatch;
+      return textMatch && categoryMatch && projectMatch && locationMatch && stockMatch;
     });
-  }, [items, query, category, project, onlyLow]);
+    return sortItems(filtered, sortMode);
+  }, [items, query, category, project, location, onlyLow, sortMode]);
 
   const lowItems = useMemo(() => items.filter((item) => item.quantity <= item.minQuantity), [items]);
   const lowCount = lowItems.length;
@@ -386,6 +568,9 @@ function App() {
           <button className="ghost-button" onClick={() => window.print()} title="Печать списка покупок">
             <Printer size={18} />
           </button>
+          <button className="ghost-button" onClick={() => setMetaOpen(true)} title="Редактор мест и проектов">
+            <Settings size={18} />
+          </button>
           <button className="ghost-button" onClick={logout} title="Выйти">
             <LogOut size={18} />
           </button>
@@ -400,6 +585,9 @@ function App() {
         <label className="search-field">
           <Search size={18} />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск, QR или штрихкод" />
+          <button type="button" onClick={() => setScannerMode('search')} title="Сканировать код">
+            <Barcode size={17} />
+          </button>
         </label>
 
         <label className="select-field">
@@ -422,6 +610,32 @@ function App() {
           </select>
         </label>
 
+        <label className="select-field">
+          <MapPin size={18} />
+          <select value={location} onChange={(event) => setLocation(event.target.value)}>
+            <option>Все</option>
+            {locations.map((entry) => (
+              <option key={entry}>{entry}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="select-field">
+          <ArrowUpDown size={18} />
+          <select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)}>
+            <option value="name">По названию</option>
+            <option value="low">Сначала докупить</option>
+            <option value="quantity">По количеству</option>
+            <option value="location">По месту</option>
+            <option value="updated">Недавно измененные</option>
+          </select>
+        </label>
+
+        <button className="toggle-button" onClick={() => setViewMode((value) => (value === 'cards' ? 'list' : 'cards'))}>
+          {viewMode === 'cards' ? <Rows3 size={18} /> : <Square size={18} />}
+          {viewMode === 'cards' ? 'Список' : 'Карточки'}
+        </button>
+
         <button className={onlyLow ? 'toggle-button active' : 'toggle-button'} onClick={() => setOnlyLow((value) => !value)}>
           <AlertTriangle size={18} />
           Нужно купить
@@ -437,10 +651,28 @@ function App() {
         </div>
       )}
 
+      {undo && (
+        <div className="toast undo-toast">
+          <span>{undo.message}</span>
+          <button
+            onClick={async () => {
+              const action = undo;
+              setUndo(null);
+              await action.run();
+            }}
+            title="Отменить"
+          >
+            <Undo2 size={16} />
+          </button>
+        </div>
+      )}
+
       <section className="workbench">
-        <section className="inventory-grid">
+        <section className={viewMode === 'list' ? 'inventory-grid list-mode' : 'inventory-grid'}>
           {filteredItems.map((item) => {
             const low = item.quantity <= item.minQuantity;
+            const step = Math.max(0.01, adjustBy[item.id] || 1);
+            const restock = Math.max(0, item.minQuantity - item.quantity);
             return (
               <article className={low ? 'item-card low' : 'item-card'} key={item.id}>
                 {item.photo ? (
@@ -470,21 +702,32 @@ function App() {
                   )}
                 </div>
                 <div className="quantity-row">
-                  <button onClick={() => adjustItem(item, -1)} title="Списать 1">
+                  <button onClick={() => adjustItem(item, -step)} title={`Списать ${formatNumber(step)}`}>
                     <Minus size={18} />
                   </button>
                   <strong>
                     {formatNumber(item.quantity)} {item.unit}
                   </strong>
-                  <button onClick={() => adjustItem(item, 1)} title="Добавить 1">
+                  <button onClick={() => adjustItem(item, step)} title={`Добавить ${formatNumber(step)}`}>
                     <Plus size={18} />
                   </button>
                 </div>
+                <label className="adjust-field">
+                  Шаг
+                  <input
+                    min="0.01"
+                    step="0.01"
+                    type="number"
+                    value={adjustBy[item.id] ?? 1}
+                    onChange={(event) => setAdjustBy((current) => ({ ...current, [item.id]: Number(event.target.value) || 1 }))}
+                  />
+                </label>
                 <dl>
                   <div>
                     <dt>Минимум</dt>
                     <dd>
                       {formatNumber(item.minQuantity)} {item.unit}
+                      {restock > 0 && <span className="restock">докупить {formatNumber(restock)} {item.unit}</span>}
                     </dd>
                   </div>
                   <div>
@@ -503,6 +746,9 @@ function App() {
                 <div className="card-actions">
                   <button onClick={() => startEdit(item)} title="Редактировать">
                     <Edit3 size={17} />
+                  </button>
+                  <button onClick={() => duplicateItem(item)} title="Дублировать">
+                    <PackagePlus size={17} />
                   </button>
                   <button onClick={() => deleteItem(item)} title="Удалить">
                     <Trash2 size={17} />
@@ -528,6 +774,7 @@ function App() {
                     <strong>{item.name}</strong>
                     <span>
                       {formatNumber(item.quantity)} / минимум {formatNumber(item.minQuantity)} {item.unit}
+                      {' · '}докупить {formatNumber(Math.max(0, item.minQuantity - item.quantity))} {item.unit}
                     </span>
                   </li>
                 ))}
@@ -579,6 +826,7 @@ function App() {
               <th>Позиция</th>
               <th>Остаток</th>
               <th>Минимум</th>
+              <th>Докупить</th>
               <th>Места</th>
               <th>Проект</th>
             </tr>
@@ -593,6 +841,9 @@ function App() {
                 <td>
                   {formatNumber(item.minQuantity)} {item.unit}
                 </td>
+                <td>
+                  {formatNumber(Math.max(0, item.minQuantity - item.quantity))} {item.unit}
+                </td>
                 <td>{item.locations.join(', ') || item.location}</td>
                 <td>{item.project}</td>
               </tr>
@@ -600,6 +851,48 @@ function App() {
           </tbody>
         </table>
       </section>
+
+      {metaOpen && (
+        <div className="drawer-backdrop" onClick={() => setMetaOpen(false)}>
+          <aside className="drawer meta-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-header">
+              <h2>Места и проекты</h2>
+              <button onClick={() => setMetaOpen(false)} title="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+            <MetaEditor
+              title="Места хранения"
+              type="location"
+              values={locations}
+              onRename={renameMeta}
+              onDelete={deleteMeta}
+            />
+            <MetaEditor
+              title="Проекты и наборы"
+              type="project"
+              values={meta.projects}
+              onRename={renameMeta}
+              onDelete={deleteMeta}
+            />
+          </aside>
+        </div>
+      )}
+
+      {scannerMode && (
+        <div className="drawer-backdrop scanner-backdrop">
+          <div className="scanner-box">
+            <div className="drawer-header">
+              <h2>Сканирование кода</h2>
+              <button onClick={() => setScannerMode(null)} title="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+            <video ref={videoRef} muted playsInline />
+            <p className="muted">Наведите камеру на QR-код или штрихкод.</p>
+          </div>
+        </div>
+      )}
 
       {panelOpen && (
         <div className="drawer-backdrop" onClick={() => setPanelOpen(false)}>
@@ -689,11 +982,16 @@ function App() {
               </label>
               <label>
                 QR / штрихкод
-                <input
-                  value={draft.barcode}
-                  onChange={(event) => setDraft({ ...draft, barcode: event.target.value })}
-                  placeholder="4601234567890 или QR-код"
-                />
+                <span className="inline-input">
+                  <input
+                    value={draft.barcode}
+                    onChange={(event) => setDraft({ ...draft, barcode: event.target.value })}
+                    placeholder="4601234567890 или QR-код"
+                  />
+                  <button type="button" onClick={() => setScannerMode('draft')} title="Сканировать код">
+                    <Barcode size={17} />
+                  </button>
+                </span>
               </label>
               <label>
                 Фото предмета или коробки
@@ -721,10 +1019,101 @@ function App() {
                 Сохранить
               </button>
             </form>
+            {editingId && (
+              <section className="item-history">
+                <h3>История позиции</h3>
+                {itemHistory.length ? (
+                  <ol>
+                    {itemHistory.map((entry) => (
+                      <li key={entry.id}>
+                        <strong>
+                          {actionLabel(entry)} {entry.amount > 0 ? '+' : ''}
+                          {formatNumber(entry.amount)}
+                        </strong>
+                        <span>стало {formatNumber(entry.quantityAfter)}</span>
+                        <time>{formatDate(entry.createdAt)}</time>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="muted">Истории по этой позиции пока нет.</p>
+                )}
+              </section>
+            )}
           </aside>
         </div>
       )}
     </main>
+  );
+}
+
+function MetaEditor({
+  title,
+  type,
+  values,
+  onRename,
+  onDelete
+}: {
+  title: string;
+  type: MetaType;
+  values: string[];
+  onRename: (type: MetaType, from: string, to: string) => Promise<void>;
+  onDelete: (type: MetaType, value: string) => Promise<void>;
+}) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busyValue, setBusyValue] = useState('');
+
+  async function save(from: string) {
+    const to = (drafts[from] ?? from).trim();
+    if (!to || to === from) return;
+    setBusyValue(from);
+    try {
+      await onRename(type, from, to);
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[from];
+        return next;
+      });
+    } finally {
+      setBusyValue('');
+    }
+  }
+
+  async function remove(value: string) {
+    const confirmed = window.confirm(`Удалить "${value}" из всех позиций?`);
+    if (!confirmed) return;
+    setBusyValue(value);
+    try {
+      await onDelete(type, value);
+    } finally {
+      setBusyValue('');
+    }
+  }
+
+  return (
+    <section className="meta-section">
+      <h3>{title}</h3>
+      {values.length ? (
+        <div className="meta-list">
+          {values.map((value) => (
+            <div className="meta-row-edit" key={value}>
+              <input
+                value={drafts[value] ?? value}
+                onChange={(event) => setDrafts((current) => ({ ...current, [value]: event.target.value }))}
+              />
+              <button disabled={busyValue === value || (drafts[value] ?? value) === value} onClick={() => save(value)}>
+                <Check size={16} />
+              </button>
+              <button disabled={busyValue === value} onClick={() => remove(value)}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">Пока нет значений.</p>
+      )}
+    </section>
   );
 }
 
