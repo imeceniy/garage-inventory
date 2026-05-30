@@ -1,5 +1,7 @@
 # Garage Inventory
 
+[Русская версия](README.ru.md)
+
 Small self-hosted web app for tracking household and garage consumables: screws,
 nuts, batteries, tape, glue, electrical parts, and other things that tend to
 disappear exactly when needed.
