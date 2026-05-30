@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,6 +23,9 @@ if (fs.existsSync(envPath)) {
 }
 
 const port = Number(process.env.PORT || 8782);
+const httpsPort = Number(process.env.HTTPS_PORT || 0);
+const httpsKeyPath = process.env.HTTPS_KEY ? path.resolve(rootDir, process.env.HTTPS_KEY) : '';
+const httpsCertPath = process.env.HTTPS_CERT ? path.resolve(rootDir, process.env.HTTPS_CERT) : '';
 const password = process.env.GARAGE_PASSWORD;
 
 if (!password) {
@@ -457,3 +461,17 @@ if (fs.existsSync(distDir)) {
 app.listen(port, '0.0.0.0', () => {
   console.log(`Garage inventory is running on http://0.0.0.0:${port}`);
 });
+
+if (httpsPort && httpsKeyPath && httpsCertPath && fs.existsSync(httpsKeyPath) && fs.existsSync(httpsCertPath)) {
+  https
+    .createServer(
+      {
+        key: fs.readFileSync(httpsKeyPath),
+        cert: fs.readFileSync(httpsCertPath)
+      },
+      app
+    )
+    .listen(httpsPort, '0.0.0.0', () => {
+      console.log(`Garage inventory HTTPS is running on https://0.0.0.0:${httpsPort}`);
+    });
+}

@@ -1,5 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+
+declare module 'react-dom/client' {
+  import * as React from 'react';
+
+  export interface Root {
+    render(children: React.ReactNode): void;
+  }
+
+  export function createRoot(container: Element | DocumentFragment): Root;
+}
+
 import {
   AlertTriangle,
   ArrowUpDown,
@@ -7,7 +18,6 @@ import {
   Boxes,
   Camera,
   Check,
-  Edit3,
   Filter,
   FolderKanban,
   History,
@@ -205,6 +215,18 @@ function App() {
 
   useEffect(() => {
     if (!scannerMode) return;
+
+    if (!window.isSecureContext) {
+      setError('Камера браузера требует HTTPS. Используйте HTTPS-адрес приложения.');
+      setScannerMode(null);
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Камера недоступна в этом браузере');
+      setScannerMode(null);
+      return;
+    }
 
     const Detector = (window as unknown as { BarcodeDetector?: new (options?: { formats?: string[] }) => { detect: (source: HTMLVideoElement) => Promise<Array<{ rawValue: string }>> } }).BarcodeDetector;
     if (!Detector) {
@@ -674,7 +696,19 @@ function App() {
             const step = Math.max(0.01, adjustBy[item.id] || 1);
             const restock = Math.max(0, item.minQuantity - item.quantity);
             return (
-              <article className={low ? 'item-card low' : 'item-card'} key={item.id}>
+              <article
+                className={low ? 'item-card low' : 'item-card'}
+                key={item.id}
+                onClick={() => startEdit(item)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    startEdit(item);
+                  }
+                }}
+              >
                 {item.photo ? (
                   <img className="item-photo" src={item.photo} alt={item.name} />
                 ) : (
@@ -702,13 +736,25 @@ function App() {
                   )}
                 </div>
                 <div className="quantity-row">
-                  <button onClick={() => adjustItem(item, -step)} title={`Списать ${formatNumber(step)}`}>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      adjustItem(item, -step);
+                    }}
+                    title={`Списать ${formatNumber(step)}`}
+                  >
                     <Minus size={18} />
                   </button>
                   <strong>
                     {formatNumber(item.quantity)} {item.unit}
                   </strong>
-                  <button onClick={() => adjustItem(item, step)} title={`Добавить ${formatNumber(step)}`}>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      adjustItem(item, step);
+                    }}
+                    title={`Добавить ${formatNumber(step)}`}
+                  >
                     <Plus size={18} />
                   </button>
                 </div>
@@ -719,6 +765,7 @@ function App() {
                     step="0.01"
                     type="number"
                     value={adjustBy[item.id] ?? 1}
+                    onClick={(event) => event.stopPropagation()}
                     onChange={(event) => setAdjustBy((current) => ({ ...current, [item.id]: Number(event.target.value) || 1 }))}
                   />
                 </label>
@@ -744,13 +791,22 @@ function App() {
                 </dl>
                 {item.note && <p className="note">{item.note}</p>}
                 <div className="card-actions">
-                  <button onClick={() => startEdit(item)} title="Редактировать">
-                    <Edit3 size={17} />
-                  </button>
-                  <button onClick={() => duplicateItem(item)} title="Дублировать">
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      duplicateItem(item);
+                    }}
+                    title="Дублировать"
+                  >
                     <PackagePlus size={17} />
                   </button>
-                  <button onClick={() => deleteItem(item)} title="Удалить">
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      deleteItem(item);
+                    }}
+                    title="Удалить"
+                  >
                     <Trash2 size={17} />
                   </button>
                 </div>

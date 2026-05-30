@@ -21,11 +21,11 @@ disappear exactly when needed.
 - Quick quantity actions with configurable per-item step values.
 - Undo for recent stock changes and deletes.
 - Operation history for additions, write-offs, creates, and manual quantity edits.
-- Long-lived per-item operation history in the edit drawer.
+- Long-lived per-item operation history in the edit popup.
 - Item or package photos stored directly with the item.
 - Client-side photo compression before saving.
 - QR/barcode text field for quick lookup.
-- Browser camera scanning for QR and supported barcodes when available.
+- Browser camera scanning for QR and supported barcodes when available over HTTPS.
 - Multiple storage locations per item.
 - Storage location and project editors for bulk rename/delete.
 - Card and compact list inventory views.
@@ -61,6 +61,9 @@ Edit `.env` and set a real password:
 
 ```env
 PORT=8782
+HTTPS_PORT=8783
+HTTPS_KEY=certs/garage.key
+HTTPS_CERT=certs/garage.crt
 GARAGE_PASSWORD=change-me
 ```
 
@@ -124,6 +127,7 @@ The app listens on the port from `.env`, for example:
 
 ```text
 http://192.168.1.82:8782
+https://192.168.1.82:8783
 ```
 
 ## Updating A Deployed Copy
@@ -142,6 +146,9 @@ pm2 restart garage-inventory
 | Name | Required | Default | Description |
 | --- | --- | --- | --- |
 | `PORT` | No | `8782` | HTTP port for the Express server. |
+| `HTTPS_PORT` | No | - | Optional HTTPS port. Required for camera scanning from another device. |
+| `HTTPS_KEY` | No | - | Path to the HTTPS private key, relative to the project root. |
+| `HTTPS_CERT` | No | - | Path to the HTTPS certificate, relative to the project root. |
 | `GARAGE_PASSWORD` | Yes | - | Password required to enter the app. |
 
 ## Notes
