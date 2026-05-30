@@ -41,18 +41,45 @@ db.exec(`
     quantity REAL NOT NULL DEFAULT 0,
     unit TEXT NOT NULL DEFAULT 'шт',
     location TEXT NOT NULL DEFAULT '',
+    locations TEXT NOT NULL DEFAULT '[]',
+    barcode TEXT NOT NULL DEFAULT '',
+    project TEXT NOT NULL DEFAULT '',
+    photo TEXT NOT NULL DEFAULT '',
     minQuantity REAL NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT '',
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS history (
+    id TEXT PRIMARY KEY,
+    itemId TEXT NOT NULL,
+    itemName TEXT NOT NULL,
+    amount REAL NOT NULL,
+    quantityAfter REAL NOT NULL,
+    action TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE
+  );
 `);
+
+const existingColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name);
+const migrations = [
+  ['locations', "ALTER TABLE items ADD COLUMN locations TEXT NOT NULL DEFAULT '[]'"],
+  ['barcode', "ALTER TABLE items ADD COLUMN barcode TEXT NOT NULL DEFAULT ''"],
+  ['project', "ALTER TABLE items ADD COLUMN project TEXT NOT NULL DEFAULT ''"],
+  ['photo', "ALTER TABLE items ADD COLUMN photo TEXT NOT NULL DEFAULT ''"]
+];
+
+for (const [column, statement] of migrations) {
+  if (!existingColumns.includes(column)) db.exec(statement);
+}
 
 const app = express();
 const sessions = new Map();
 const sessionTtlMs = 1000 * 60 * 60 * 24 * 30;
 
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json({ limit: '5mb' }));
 
 // Normalize API output so SQLite rows do not leak database-specific shape.
 function nowIso() {
@@ -68,19 +95,64 @@ function normalizeNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function normalizeList(value) {
+  if (Array.isArray(value)) {
+    return value.map(normalizeText).filter(Boolean);
+  }
+
+  return normalizeText(value)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseList(value, fallback = []) {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === 'string' && entry.trim()) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function toItem(row) {
+  const legacyLocation = normalizeText(row.location);
+  const locations = parseList(row.locations, legacyLocation ? [legacyLocation] : []);
   return {
     id: row.id,
     name: row.name,
     category: row.category,
     quantity: row.quantity,
     unit: row.unit,
-    location: row.location,
+    location: legacyLocation,
+    locations,
+    barcode: row.barcode,
+    project: row.project,
+    photo: row.photo,
     minQuantity: row.minQuantity,
     note: row.note,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
+}
+
+function toHistory(row) {
+  return {
+    id: row.id,
+    itemId: row.itemId,
+    itemName: row.itemName,
+    amount: row.amount,
+    quantityAfter: row.quantityAfter,
+    action: row.action,
+    createdAt: row.createdAt
+  };
+}
+
+function recordHistory(item, amount, action) {
+  db.prepare(`
+    INSERT INTO history (id, itemId, itemName, amount, quantityAfter, action, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(crypto.randomUUID(), item.id, item.name, amount, item.quantity, action, nowIso());
 }
 
 function readToken(req) {
@@ -128,6 +200,23 @@ function validateItem(payload, partial = false) {
     item.location = normalizeText(payload.location);
   }
 
+  if (!partial || payload.locations !== undefined) {
+    item.locations = normalizeList(payload.locations);
+  }
+
+  if (!partial || payload.barcode !== undefined) {
+    item.barcode = normalizeText(payload.barcode);
+  }
+
+  if (!partial || payload.project !== undefined) {
+    item.project = normalizeText(payload.project);
+  }
+
+  if (!partial || payload.photo !== undefined) {
+    const photo = normalizeText(payload.photo);
+    item.photo = photo.startsWith('data:image/') ? photo : '';
+  }
+
   if (!partial || payload.minQuantity !== undefined) {
     item.minQuantity = Math.max(0, normalizeNumber(payload.minQuantity));
   }
@@ -160,6 +249,11 @@ app.get('/api/items', requireAuth, (_req, res) => {
   res.json(rows.map(toItem));
 });
 
+app.get('/api/history', requireAuth, (_req, res) => {
+  const rows = db.prepare('SELECT * FROM history ORDER BY createdAt DESC LIMIT 200').all();
+  res.json(rows.map(toHistory));
+});
+
 app.post('/api/items', requireAuth, (req, res) => {
   try {
     const item = validateItem(req.body);
@@ -167,15 +261,22 @@ app.post('/api/items', requireAuth, (req, res) => {
     const timestamp = nowIso();
 
     db.prepare(`
-      INSERT INTO items (id, name, category, quantity, unit, location, minQuantity, note, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO items (
+        id, name, category, quantity, unit, location, locations, barcode, project, photo,
+        minQuantity, note, createdAt, updatedAt
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       item.name,
       item.category,
       item.quantity,
       item.unit,
-      item.location,
+      item.locations[0] || item.location,
+      JSON.stringify(item.locations),
+      item.barcode,
+      item.project,
+      item.photo,
       item.minQuantity,
       item.note,
       timestamp,
@@ -183,7 +284,9 @@ app.post('/api/items', requireAuth, (req, res) => {
     );
 
     const row = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
-    res.status(201).json(toItem(row));
+    const saved = toItem(row);
+    if (saved.quantity > 0) recordHistory(saved, saved.quantity, 'create');
+    res.status(201).json(saved);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -197,17 +300,23 @@ app.patch('/api/items/:id', requireAuth, (req, res) => {
   }
 
   try {
-    const update = { ...toItem(existing), ...validateItem(req.body, true), updatedAt: nowIso() };
+    const previous = toItem(existing);
+    const update = { ...previous, ...validateItem(req.body, true), updatedAt: nowIso() };
     db.prepare(`
       UPDATE items
-      SET name = ?, category = ?, quantity = ?, unit = ?, location = ?, minQuantity = ?, note = ?, updatedAt = ?
+      SET name = ?, category = ?, quantity = ?, unit = ?, location = ?, locations = ?, barcode = ?, project = ?,
+        photo = ?, minQuantity = ?, note = ?, updatedAt = ?
       WHERE id = ?
     `).run(
       update.name,
       update.category,
       update.quantity,
       update.unit,
-      update.location,
+      update.locations[0] || update.location,
+      JSON.stringify(update.locations),
+      update.barcode,
+      update.project,
+      update.photo,
       update.minQuantity,
       update.note,
       update.updatedAt,
@@ -215,7 +324,10 @@ app.patch('/api/items/:id', requireAuth, (req, res) => {
     );
 
     const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-    res.json(toItem(row));
+    const saved = toItem(row);
+    const delta = saved.quantity - previous.quantity;
+    if (delta !== 0) recordHistory(saved, delta, 'edit');
+    res.json(saved);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -237,7 +349,9 @@ app.post('/api/items/:id/adjust', requireAuth, (req, res) => {
   const quantity = Math.max(0, existing.quantity + amount);
   db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(quantity, nowIso(), req.params.id);
   const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-  res.json(toItem(row));
+  const saved = toItem(row);
+  recordHistory(saved, quantity - existing.quantity, amount >= 0 ? 'add' : 'subtract');
+  res.json(saved);
 });
 
 app.delete('/api/items/:id', requireAuth, (req, res) => {

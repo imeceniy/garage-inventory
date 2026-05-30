@@ -10,10 +10,17 @@ disappear exactly when needed.
 - Card-based inventory view.
 - Add, edit, and delete inventory items.
 - Track quantity, unit, category, storage location, minimum stock, and notes.
-- Search by name, category, location, or note.
+- Search by name, category, location, QR/barcode, project, or note.
 - Filter by category.
+- Filter by project or kit.
 - Show only items that need restocking.
 - Quick `+1` and `-1` quantity actions.
+- Operation history for additions, write-offs, creates, and manual quantity edits.
+- Item or package photos stored directly with the item.
+- QR/barcode text field for quick lookup.
+- Multiple storage locations per item.
+- Printable shopping list for low-stock items.
+- Light and dark themes.
 - SQLite storage with no external database server.
 
 ## Stack
