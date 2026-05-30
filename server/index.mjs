@@ -10,6 +10,7 @@ const rootDir = path.resolve(__dirname, '..');
 const dataDir = path.join(rootDir, 'data');
 const dbPath = path.join(dataDir, 'garage.sqlite');
 
+// Load a local .env file before reading runtime settings.
 const envPath = path.join(rootDir, '.env');
 if (fs.existsSync(envPath)) {
   const envText = fs.readFileSync(envPath, 'utf8');
@@ -30,6 +31,7 @@ if (!password) {
 
 fs.mkdirSync(dataDir, { recursive: true });
 
+// Keep the schema intentionally small so the app stays easy to back up and move.
 const db = new DatabaseSync(dbPath);
 db.exec(`
   CREATE TABLE IF NOT EXISTS items (
@@ -52,6 +54,7 @@ const sessionTtlMs = 1000 * 60 * 60 * 24 * 30;
 
 app.use(express.json({ limit: '100kb' }));
 
+// Normalize API output so SQLite rows do not leak database-specific shape.
 function nowIso() {
   return new Date().toISOString();
 }
@@ -85,6 +88,7 @@ function readToken(req) {
   return header.startsWith('Bearer ') ? header.slice(7) : '';
 }
 
+// Sessions are in memory: simple enough for a home server, and invalidated on restart.
 function requireAuth(req, res, next) {
   const token = readToken(req);
   const expiresAt = sessions.get(token);
@@ -99,6 +103,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
+// Use one validator for create and partial update requests.
 function validateItem(payload, partial = false) {
   const item = {};
 
@@ -149,6 +154,7 @@ app.get('/api/auth/me', requireAuth, (_req, res) => {
   res.json({ ok: true });
 });
 
+// Inventory CRUD endpoints.
 app.get('/api/items', requireAuth, (_req, res) => {
   const rows = db.prepare('SELECT * FROM items ORDER BY lower(name), createdAt').all();
   res.json(rows.map(toItem));
@@ -242,6 +248,7 @@ app.delete('/api/items/:id', requireAuth, (req, res) => {
 const distDir = path.join(rootDir, 'dist');
 if (fs.existsSync(distDir)) {
   app.use(express.static(distDir));
+  // Let React handle deep links after static assets and API routes are checked.
   app.get(/.*/, (_req, res) => {
     res.sendFile(path.join(distDir, 'index.html'));
   });

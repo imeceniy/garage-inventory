@@ -60,6 +60,7 @@ function authHeaders(token: string) {
 }
 
 function App() {
+  // UI state is kept local; the server remains the source of truth for items.
   const [token, setToken] = useState(() => localStorage.getItem(tokenKey) || '');
   const [password, setPassword] = useState('');
   const [items, setItems] = useState<Item[]>([]);
@@ -72,6 +73,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  // Shared API wrapper handles auth expiry and consistent error messages.
   async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const response = await fetch(url, {
       ...options,
@@ -100,6 +102,7 @@ function App() {
     return response.json();
   }
 
+  // Reload inventory whenever a valid session becomes available.
   async function loadItems() {
     if (!token) return;
     setError('');
@@ -159,6 +162,7 @@ function App() {
     setPanelOpen(true);
   }
 
+  // Create and update share the same drawer form and local optimistic refresh path.
   async function saveItem(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -188,6 +192,7 @@ function App() {
     }
   }
 
+  // Fast quantity changes are applied through a dedicated API route.
   async function adjustItem(item: Item, amount: number) {
     try {
       const updated = await request<Item>(`/api/items/${item.id}/adjust`, {
@@ -212,6 +217,7 @@ function App() {
     }
   }
 
+  // Filtering stays client-side because the inventory is expected to be small.
   const filteredItems = useMemo(() => {
     const search = query.trim().toLowerCase();
     return items.filter((item) => {
