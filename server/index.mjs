@@ -48,6 +48,8 @@ db.exec(`
     locations TEXT NOT NULL DEFAULT '[]',
     barcode TEXT NOT NULL DEFAULT '',
     project TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]',
+    containerId TEXT NOT NULL DEFAULT '',
     photo TEXT NOT NULL DEFAULT '',
     minQuantity REAL NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT '',
@@ -65,6 +67,37 @@ db.exec(`
     createdAt TEXT NOT NULL,
     FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS containers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    code TEXT NOT NULL UNIQUE,
+    location TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS inventory_sessions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    startedAt TEXT NOT NULL,
+    completedAt TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE TABLE IF NOT EXISTS inventory_checks (
+    id TEXT PRIMARY KEY,
+    sessionId TEXT NOT NULL,
+    itemId TEXT NOT NULL,
+    itemName TEXT NOT NULL,
+    expectedQuantity REAL NOT NULL,
+    actualQuantity REAL NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    checkedAt TEXT NOT NULL,
+    FOREIGN KEY (sessionId) REFERENCES inventory_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE
+  );
 `);
 
 const existingColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name);
@@ -72,6 +105,8 @@ const migrations = [
   ['locations', "ALTER TABLE items ADD COLUMN locations TEXT NOT NULL DEFAULT '[]'"],
   ['barcode', "ALTER TABLE items ADD COLUMN barcode TEXT NOT NULL DEFAULT ''"],
   ['project', "ALTER TABLE items ADD COLUMN project TEXT NOT NULL DEFAULT ''"],
+  ['tags', "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"],
+  ['containerId', "ALTER TABLE items ADD COLUMN containerId TEXT NOT NULL DEFAULT ''"],
   ['photo', "ALTER TABLE items ADD COLUMN photo TEXT NOT NULL DEFAULT ''"]
 ];
 
@@ -132,11 +167,48 @@ function toItem(row) {
     locations,
     barcode: row.barcode,
     project: row.project,
+    tags: parseList(row.tags),
+    containerId: row.containerId,
     photo: row.photo,
     minQuantity: row.minQuantity,
     note: row.note,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
+  };
+}
+
+function toContainer(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    code: row.code,
+    location: row.location,
+    note: row.note,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function toInventorySession(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    startedAt: row.startedAt,
+    completedAt: row.completedAt
+  };
+}
+
+function toInventoryCheck(row) {
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    itemId: row.itemId,
+    itemName: row.itemName,
+    expectedQuantity: row.expectedQuantity,
+    actualQuantity: row.actualQuantity,
+    note: row.note,
+    checkedAt: row.checkedAt
   };
 }
 
@@ -224,6 +296,14 @@ function validateItem(payload, partial = false) {
     item.project = normalizeText(payload.project);
   }
 
+  if (!partial || payload.tags !== undefined) {
+    item.tags = normalizeList(payload.tags);
+  }
+
+  if (!partial || payload.containerId !== undefined) {
+    item.containerId = normalizeText(payload.containerId);
+  }
+
   if (!partial || payload.photo !== undefined) {
     const photo = normalizeText(payload.photo);
     item.photo = photo.startsWith('data:image/') ? photo : '';
@@ -272,18 +352,21 @@ app.get('/api/items/:id/history', requireAuth, (req, res) => {
 });
 
 app.get('/api/meta', requireAuth, (_req, res) => {
-  const items = db.prepare('SELECT locations, location, project FROM items').all().map(toItem);
+  const items = db.prepare('SELECT locations, location, project, tags FROM items').all().map(toItem);
   const locations = new Set();
   const projects = new Set();
+  const tags = new Set();
 
   for (const item of items) {
     for (const location of item.locations) locations.add(location);
+    for (const tag of item.tags) tags.add(tag);
     if (item.project) projects.add(item.project);
   }
 
   res.json({
     locations: Array.from(locations).sort((a, b) => a.localeCompare(b, 'ru')),
-    projects: Array.from(projects).sort((a, b) => a.localeCompare(b, 'ru'))
+    projects: Array.from(projects).sort((a, b) => a.localeCompare(b, 'ru')),
+    tags: Array.from(tags).sort((a, b) => a.localeCompare(b, 'ru'))
   });
 });
 
@@ -292,24 +375,29 @@ app.post('/api/meta/rename', requireAuth, (req, res) => {
   const from = normalizeText(req.body?.from);
   const to = normalizeText(req.body?.to);
 
-  if (!['location', 'project'].includes(type) || !from || !to) {
+  if (!['location', 'project', 'tag'].includes(type) || !from || !to) {
     res.status(400).json({ error: 'Некорректное переименование' });
     return;
   }
 
   const timestamp = nowIso();
   const rows = db.prepare('SELECT * FROM items').all();
-  const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, updatedAt = ? WHERE id = ?');
+  const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, tags = ?, updatedAt = ? WHERE id = ?');
 
   for (const row of rows) {
     const item = toItem(row);
     if (type === 'project' && item.project === from) {
-      update.run(item.location, JSON.stringify(item.locations), to, timestamp, item.id);
+      update.run(item.location, JSON.stringify(item.locations), to, JSON.stringify(item.tags), timestamp, item.id);
     }
 
     if (type === 'location' && item.locations.includes(from)) {
       const locations = replaceLocation(item.locations, from, to);
-      update.run(locations[0] || '', JSON.stringify(locations), item.project, timestamp, item.id);
+      update.run(locations[0] || '', JSON.stringify(locations), item.project, JSON.stringify(item.tags), timestamp, item.id);
+    }
+
+    if (type === 'tag' && item.tags.includes(from)) {
+      const tags = item.tags.map((entry) => (entry === from ? to : entry));
+      update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
     }
   }
 
@@ -320,28 +408,168 @@ app.post('/api/meta/delete', requireAuth, (req, res) => {
   const type = req.body?.type;
   const value = normalizeText(req.body?.value);
 
-  if (!['location', 'project'].includes(type) || !value) {
+  if (!['location', 'project', 'tag'].includes(type) || !value) {
     res.status(400).json({ error: 'Некорректное удаление' });
     return;
   }
 
   const timestamp = nowIso();
   const rows = db.prepare('SELECT * FROM items').all();
-  const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, updatedAt = ? WHERE id = ?');
+  const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, tags = ?, updatedAt = ? WHERE id = ?');
 
   for (const row of rows) {
     const item = toItem(row);
     if (type === 'project' && item.project === value) {
-      update.run(item.location, JSON.stringify(item.locations), '', timestamp, item.id);
+      update.run(item.location, JSON.stringify(item.locations), '', JSON.stringify(item.tags), timestamp, item.id);
     }
 
     if (type === 'location' && item.locations.includes(value)) {
       const locations = item.locations.filter((entry) => entry !== value);
-      update.run(locations[0] || '', JSON.stringify(locations), item.project, timestamp, item.id);
+      update.run(locations[0] || '', JSON.stringify(locations), item.project, JSON.stringify(item.tags), timestamp, item.id);
+    }
+
+    if (type === 'tag' && item.tags.includes(value)) {
+      const tags = item.tags.filter((entry) => entry !== value);
+      update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
     }
   }
 
   res.json({ ok: true });
+});
+
+app.get('/api/containers', requireAuth, (_req, res) => {
+  const rows = db.prepare('SELECT * FROM containers ORDER BY lower(name), createdAt').all();
+  res.json(rows.map(toContainer));
+});
+
+app.post('/api/containers', requireAuth, (req, res) => {
+  const name = normalizeText(req.body?.name);
+  if (!name) {
+    res.status(400).json({ error: 'Название контейнера обязательно' });
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  const timestamp = nowIso();
+  const code = normalizeText(req.body?.code) || `container:${id}`;
+  db.prepare(`
+    INSERT INTO containers (id, name, code, location, note, createdAt, updatedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, name, code, normalizeText(req.body?.location), normalizeText(req.body?.note), timestamp, timestamp);
+
+  res.status(201).json(toContainer(db.prepare('SELECT * FROM containers WHERE id = ?').get(id)));
+});
+
+app.patch('/api/containers/:id', requireAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM containers WHERE id = ?').get(req.params.id);
+  if (!existing) {
+    res.status(404).json({ error: 'Контейнер не найден' });
+    return;
+  }
+
+  const current = toContainer(existing);
+  const update = {
+    name: req.body?.name === undefined ? current.name : normalizeText(req.body.name),
+    code: req.body?.code === undefined ? current.code : normalizeText(req.body.code),
+    location: req.body?.location === undefined ? current.location : normalizeText(req.body.location),
+    note: req.body?.note === undefined ? current.note : normalizeText(req.body.note)
+  };
+
+  if (!update.name || !update.code) {
+    res.status(400).json({ error: 'Название и код контейнера обязательны' });
+    return;
+  }
+
+  db.prepare('UPDATE containers SET name = ?, code = ?, location = ?, note = ?, updatedAt = ? WHERE id = ?').run(
+    update.name,
+    update.code,
+    update.location,
+    update.note,
+    nowIso(),
+    req.params.id
+  );
+
+  res.json(toContainer(db.prepare('SELECT * FROM containers WHERE id = ?').get(req.params.id)));
+});
+
+app.delete('/api/containers/:id', requireAuth, (req, res) => {
+  db.prepare('UPDATE items SET containerId = ?, updatedAt = ? WHERE containerId = ?').run('', nowIso(), req.params.id);
+  db.prepare('DELETE FROM containers WHERE id = ?').run(req.params.id);
+  res.status(204).end();
+});
+
+app.get('/api/inventory/sessions', requireAuth, (_req, res) => {
+  const rows = db.prepare('SELECT * FROM inventory_sessions ORDER BY startedAt DESC').all();
+  res.json(rows.map(toInventorySession));
+});
+
+app.post('/api/inventory/sessions', requireAuth, (req, res) => {
+  const id = crypto.randomUUID();
+  const timestamp = nowIso();
+  const name = normalizeText(req.body?.name) || `Инвентаризация ${new Date().toLocaleDateString('ru-RU')}`;
+  db.prepare('INSERT INTO inventory_sessions (id, name, status, startedAt, completedAt) VALUES (?, ?, ?, ?, ?)').run(
+    id,
+    name,
+    'open',
+    timestamp,
+    ''
+  );
+  res.status(201).json(toInventorySession(db.prepare('SELECT * FROM inventory_sessions WHERE id = ?').get(id)));
+});
+
+app.patch('/api/inventory/sessions/:id', requireAuth, (req, res) => {
+  const existing = db.prepare('SELECT * FROM inventory_sessions WHERE id = ?').get(req.params.id);
+  if (!existing) {
+    res.status(404).json({ error: 'Сессия инвентаризации не найдена' });
+    return;
+  }
+
+  const status = req.body?.status === 'closed' ? 'closed' : 'open';
+  db.prepare('UPDATE inventory_sessions SET status = ?, completedAt = ? WHERE id = ?').run(
+    status,
+    status === 'closed' ? nowIso() : '',
+    req.params.id
+  );
+  res.json(toInventorySession(db.prepare('SELECT * FROM inventory_sessions WHERE id = ?').get(req.params.id)));
+});
+
+app.get('/api/inventory/sessions/:id/checks', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM inventory_checks WHERE sessionId = ? ORDER BY checkedAt DESC').all(req.params.id);
+  res.json(rows.map(toInventoryCheck));
+});
+
+app.post('/api/inventory/sessions/:id/checks', requireAuth, (req, res) => {
+  const item = db.prepare('SELECT * FROM items WHERE id = ?').get(req.body?.itemId);
+  const session = db.prepare('SELECT * FROM inventory_sessions WHERE id = ?').get(req.params.id);
+  if (!session || !item) {
+    res.status(404).json({ error: 'Сессия или позиция не найдена' });
+    return;
+  }
+
+  const current = toItem(item);
+  const actualQuantity = Math.max(0, normalizeNumber(req.body?.actualQuantity, current.quantity));
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO inventory_checks (id, sessionId, itemId, itemName, expectedQuantity, actualQuantity, note, checkedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    crypto.randomUUID(),
+    req.params.id,
+    current.id,
+    current.name,
+    current.quantity,
+    actualQuantity,
+    normalizeText(req.body?.note),
+    timestamp
+  );
+
+  if (actualQuantity !== current.quantity) {
+    db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(actualQuantity, timestamp, current.id);
+    recordHistory({ ...current, quantity: actualQuantity }, actualQuantity - current.quantity, 'inventory');
+  }
+
+  const rows = db.prepare('SELECT * FROM inventory_checks WHERE sessionId = ? ORDER BY checkedAt DESC').all(req.params.id);
+  res.status(201).json(rows.map(toInventoryCheck));
 });
 
 app.post('/api/items', requireAuth, (req, res) => {
@@ -352,10 +580,10 @@ app.post('/api/items', requireAuth, (req, res) => {
 
     db.prepare(`
       INSERT INTO items (
-        id, name, category, quantity, unit, location, locations, barcode, project, photo,
-        minQuantity, note, createdAt, updatedAt
+        id, name, category, quantity, unit, location, locations, barcode, project, tags,
+        containerId, photo, minQuantity, note, createdAt, updatedAt
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       item.name,
@@ -366,6 +594,8 @@ app.post('/api/items', requireAuth, (req, res) => {
       JSON.stringify(item.locations),
       item.barcode,
       item.project,
+      JSON.stringify(item.tags),
+      item.containerId,
       item.photo,
       item.minQuantity,
       item.note,
@@ -395,7 +625,7 @@ app.patch('/api/items/:id', requireAuth, (req, res) => {
     db.prepare(`
       UPDATE items
       SET name = ?, category = ?, quantity = ?, unit = ?, location = ?, locations = ?, barcode = ?, project = ?,
-        photo = ?, minQuantity = ?, note = ?, updatedAt = ?
+        tags = ?, containerId = ?, photo = ?, minQuantity = ?, note = ?, updatedAt = ?
       WHERE id = ?
     `).run(
       update.name,
@@ -406,6 +636,8 @@ app.patch('/api/items/:id', requireAuth, (req, res) => {
       JSON.stringify(update.locations),
       update.barcode,
       update.project,
+      JSON.stringify(update.tags),
+      update.containerId,
       update.photo,
       update.minQuantity,
       update.note,

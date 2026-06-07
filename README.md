@@ -16,6 +16,7 @@ disappear exactly when needed.
 - Filter by category.
 - Filter by project or kit.
 - Filter by storage location.
+- Filter by tag or container.
 - Sort by name, stock level, quantity, location, or recent updates.
 - Show only items that need restocking.
 - Quick quantity actions with configurable per-item step values.
@@ -26,8 +27,12 @@ disappear exactly when needed.
 - Client-side photo compression before saving.
 - QR/barcode text field for quick lookup.
 - Browser camera scanning for QR and supported barcodes when available over HTTPS.
+- QR code generation for items and containers.
 - Multiple storage locations per item.
 - Storage location and project editors for bulk rename/delete.
+- Tags with filtering and bulk rename/delete.
+- Container/box entities with their own QR codes.
+- Inventory sessions for checking actual stock and writing quantity corrections into history.
 - Card and compact list inventory views.
 - Printable shopping list for low-stock items.
 - Light and dark themes.

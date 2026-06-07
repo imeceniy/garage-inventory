@@ -18,6 +18,7 @@ import {
   Boxes,
   Camera,
   Check,
+  ClipboardCheck,
   Filter,
   FolderKanban,
   History,
@@ -28,6 +29,7 @@ import {
   PackagePlus,
   Plus,
   Printer,
+  QrCode,
   Rows3,
   Search,
   Settings,
@@ -49,6 +51,8 @@ type Item = {
   locations: string[];
   barcode: string;
   project: string;
+  tags: string[];
+  containerId: string;
   photo: string;
   minQuantity: number;
   note: string;
@@ -62,16 +66,29 @@ type HistoryEntry = {
   itemName: string;
   amount: number;
   quantityAfter: number;
-  action: 'create' | 'edit' | 'add' | 'subtract';
+  action: 'create' | 'edit' | 'add' | 'subtract' | 'inventory';
   createdAt: string;
 };
 
 type Draft = Omit<Item, 'id' | 'createdAt' | 'updatedAt'>;
 type ViewMode = 'cards' | 'list';
 type SortMode = 'name' | 'quantity' | 'low' | 'updated' | 'location';
-type MetaType = 'location' | 'project';
+type MetaType = 'location' | 'project' | 'tag';
 type UndoAction = { message: string; run: () => Promise<void> };
-type MetaState = { locations: string[]; projects: string[] };
+type MetaState = { locations: string[]; projects: string[]; tags: string[] };
+type Container = { id: string; name: string; code: string; location: string; note: string; createdAt: string; updatedAt: string };
+type InventorySession = { id: string; name: string; status: 'open' | 'closed'; startedAt: string; completedAt: string };
+type InventoryCheck = {
+  id: string;
+  sessionId: string;
+  itemId: string;
+  itemName: string;
+  expectedQuantity: number;
+  actualQuantity: number;
+  note: string;
+  checkedAt: string;
+};
+type QrTarget = { title: string; value: string } | null;
 
 const emptyDraft: Draft = {
   name: '',
@@ -82,6 +99,8 @@ const emptyDraft: Draft = {
   locations: [],
   barcode: '',
   project: '',
+  tags: [],
+  containerId: '',
   photo: '',
   minQuantity: 0,
   note: ''
@@ -161,6 +180,7 @@ function formatDate(value: string) {
 function actionLabel(entry: HistoryEntry) {
   if (entry.action === 'create') return 'создано';
   if (entry.action === 'edit') return 'изменено вручную';
+  if (entry.action === 'inventory') return 'инвентаризация';
   return entry.amount > 0 ? 'добавлено' : 'списано';
 }
 
@@ -180,11 +200,16 @@ function App() {
   const [password, setPassword] = useState('');
   const [items, setItems] = useState<Item[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [meta, setMeta] = useState<MetaState>({ locations: [], projects: [] });
+  const [containers, setContainers] = useState<Container[]>([]);
+  const [inventorySessions, setInventorySessions] = useState<InventorySession[]>([]);
+  const [inventoryChecks, setInventoryChecks] = useState<InventoryCheck[]>([]);
+  const [meta, setMeta] = useState<MetaState>({ locations: [], projects: [], tags: [] });
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('Все');
   const [project, setProject] = useState('Все');
   const [location, setLocation] = useState('Все');
+  const [tag, setTag] = useState('Все');
+  const [containerId, setContainerId] = useState('Все');
   const [onlyLow, setOnlyLow] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('cards');
   const [sortMode, setSortMode] = useState<SortMode>('name');
@@ -194,7 +219,13 @@ function App() {
   const [itemHistory, setItemHistory] = useState<HistoryEntry[]>([]);
   const [panelOpen, setPanelOpen] = useState(false);
   const [metaOpen, setMetaOpen] = useState(false);
+  const [containersOpen, setContainersOpen] = useState(false);
+  const [inventoryOpen, setInventoryOpen] = useState(false);
   const [scannerMode, setScannerMode] = useState<'search' | 'draft' | null>(null);
+  const [qrTarget, setQrTarget] = useState<QrTarget>(null);
+  const [qrImage, setQrImage] = useState('');
+  const [activeInventoryId, setActiveInventoryId] = useState('');
+  const [inventoryQuantities, setInventoryQuantities] = useState<Record<string, number>>({});
   const [undo, setUndo] = useState<UndoAction | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -206,6 +237,24 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(themeKey, theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!qrTarget) {
+      setQrImage('');
+      return;
+    }
+
+    let cancelled = false;
+    import('qrcode').then((QRCode) => {
+      QRCode.toDataURL(qrTarget.value, { margin: 2, width: 280 }).then((url: string) => {
+        if (!cancelled) setQrImage(url);
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [qrTarget]);
 
   useEffect(() => {
     if (!undo) return;
@@ -314,14 +363,19 @@ function App() {
     if (!token) return;
     setError('');
     try {
-      const [nextItems, nextHistory, nextMeta] = await Promise.all([
+      const [nextItems, nextHistory, nextMeta, nextContainers, nextSessions] = await Promise.all([
         request<Item[]>('/api/items'),
         request<HistoryEntry[]>('/api/history'),
-        request<MetaState>('/api/meta')
+        request<MetaState>('/api/meta'),
+        request<Container[]>('/api/containers'),
+        request<InventorySession[]>('/api/inventory/sessions')
       ]);
       setItems(nextItems);
       setHistory(nextHistory);
       setMeta(nextMeta);
+      setContainers(nextContainers);
+      setInventorySessions(nextSessions);
+      setActiveInventoryId((current) => current || nextSessions.find((session) => session.status === 'open')?.id || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить данные');
     }
@@ -330,6 +384,10 @@ function App() {
   useEffect(() => {
     loadData();
   }, [token]);
+
+  useEffect(() => {
+    if (token) loadInventoryChecks(activeInventoryId);
+  }, [token, activeInventoryId]);
 
   async function login(event: React.FormEvent) {
     event.preventDefault();
@@ -362,7 +420,10 @@ function App() {
     setToken('');
     setItems([]);
     setHistory([]);
-    setMeta({ locations: [], projects: [] });
+    setContainers([]);
+    setInventorySessions([]);
+    setInventoryChecks([]);
+    setMeta({ locations: [], projects: [], tags: [] });
   }
 
   function startCreate() {
@@ -502,6 +563,59 @@ function App() {
     await loadData();
   }
 
+  async function saveContainer(container: Partial<Container>) {
+    const body = JSON.stringify(container);
+    if (container.id) {
+      await request<Container>(`/api/containers/${container.id}`, { method: 'PATCH', body });
+    } else {
+      await request<Container>('/api/containers', { method: 'POST', body });
+    }
+    await loadData();
+  }
+
+  async function deleteContainer(id: string) {
+    await request(`/api/containers/${id}`, { method: 'DELETE' });
+    await loadData();
+  }
+
+  async function createInventorySession() {
+    const session = await request<InventorySession>('/api/inventory/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ name: `Инвентаризация ${new Date().toLocaleDateString('ru-RU')}` })
+    });
+    setActiveInventoryId(session.id);
+    setInventoryOpen(true);
+    await loadData();
+  }
+
+  async function closeInventorySession(id: string) {
+    await request<InventorySession>(`/api/inventory/sessions/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'closed' })
+    });
+    setActiveInventoryId('');
+    await loadData();
+  }
+
+  async function loadInventoryChecks(sessionId: string) {
+    if (!sessionId) {
+      setInventoryChecks([]);
+      return;
+    }
+    setInventoryChecks(await request<InventoryCheck[]>(`/api/inventory/sessions/${sessionId}/checks`));
+  }
+
+  async function checkInventoryItem(item: Item) {
+    if (!activeInventoryId) return;
+    const actualQuantity = inventoryQuantities[item.id] ?? item.quantity;
+    const checks = await request<InventoryCheck[]>(`/api/inventory/sessions/${activeInventoryId}/checks`, {
+      method: 'POST',
+      body: JSON.stringify({ itemId: item.id, actualQuantity })
+    });
+    setInventoryChecks(checks);
+    await loadData();
+  }
+
   const projects = useMemo(() => {
     const dynamic = items.map((item) => item.project).filter(Boolean);
     return Array.from(new Set([...defaultProjects, ...meta.projects, ...dynamic])).sort((a, b) => a.localeCompare(b, 'ru'));
@@ -511,6 +625,14 @@ function App() {
     const dynamic = items.flatMap(itemLocations);
     return Array.from(new Set([...meta.locations, ...dynamic])).sort((a, b) => a.localeCompare(b, 'ru'));
   }, [items, meta.locations]);
+
+  const tags = useMemo(() => {
+    const dynamic = items.flatMap((item) => item.tags);
+    return Array.from(new Set([...meta.tags, ...dynamic])).sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [items, meta.tags]);
+
+  const activeInventory = inventorySessions.find((session) => session.id === activeInventoryId);
+  const checkedItemIds = new Set(inventoryChecks.map((check) => check.itemId));
 
   // Filtering stays client-side because the inventory is expected to be small.
   const filteredItems = useMemo(() => {
@@ -525,6 +647,8 @@ function App() {
         locations.join(' '),
         item.barcode,
         item.project,
+        item.tags.join(' '),
+        containers.find((container) => container.id === item.containerId)?.name || '',
         item.note
       ]
         .join(' ')
@@ -533,11 +657,13 @@ function App() {
       const categoryMatch = category === 'Все' || item.category === category;
       const projectMatch = project === 'Все' || item.project === project;
       const locationMatch = location === 'Все' || locations.includes(location);
+      const tagMatch = tag === 'Все' || item.tags.includes(tag);
+      const containerMatch = containerId === 'Все' || item.containerId === containerId;
       const stockMatch = !onlyLow || low;
-      return textMatch && categoryMatch && projectMatch && locationMatch && stockMatch;
+      return textMatch && categoryMatch && projectMatch && locationMatch && tagMatch && containerMatch && stockMatch;
     });
     return sortItems(filtered, sortMode);
-  }, [items, query, category, project, location, onlyLow, sortMode]);
+  }, [items, query, category, project, location, tag, containerId, onlyLow, sortMode, containers]);
 
   const lowItems = useMemo(() => items.filter((item) => item.quantity <= item.minQuantity), [items]);
   const lowCount = lowItems.length;
@@ -593,6 +719,12 @@ function App() {
           <button className="ghost-button" onClick={() => setMetaOpen(true)} title="Редактор мест и проектов">
             <Settings size={18} />
           </button>
+          <button className="ghost-button" onClick={() => setContainersOpen(true)} title="Контейнеры и ящики">
+            <Boxes size={18} />
+          </button>
+          <button className="ghost-button" onClick={() => setInventoryOpen(true)} title="Инвентаризация">
+            <ClipboardCheck size={18} />
+          </button>
           <button className="ghost-button" onClick={logout} title="Выйти">
             <LogOut size={18} />
           </button>
@@ -638,6 +770,28 @@ function App() {
             <option>Все</option>
             {locations.map((entry) => (
               <option key={entry}>{entry}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="select-field">
+          <Barcode size={18} />
+          <select value={tag} onChange={(event) => setTag(event.target.value)}>
+            <option>Все</option>
+            {tags.map((entry) => (
+              <option key={entry}>{entry}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="select-field">
+          <Boxes size={18} />
+          <select value={containerId} onChange={(event) => setContainerId(event.target.value)}>
+            <option>Все</option>
+            {containers.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.name}
+              </option>
             ))}
           </select>
         </label>
@@ -695,6 +849,7 @@ function App() {
             const low = item.quantity <= item.minQuantity;
             const step = Math.max(0.01, adjustBy[item.id] || 1);
             const restock = Math.max(0, item.minQuantity - item.quantity);
+            const container = containers.find((entry) => entry.id === item.containerId);
             return (
               <article
                 className={low ? 'item-card low' : 'item-card'}
@@ -734,6 +889,15 @@ function App() {
                       {item.barcode}
                     </span>
                   )}
+                  {container && (
+                    <span>
+                      <Boxes size={14} />
+                      {container.name}
+                    </span>
+                  )}
+                  {item.tags.map((entry) => (
+                    <span key={entry}>#{entry}</span>
+                  ))}
                 </div>
                 <div className="quantity-row">
                   <button
@@ -799,6 +963,15 @@ function App() {
                     title="Дублировать"
                   >
                     <PackagePlus size={17} />
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setQrTarget({ title: item.name, value: item.barcode || `item:${item.id}` });
+                    }}
+                    title="QR-код позиции"
+                  >
+                    <QrCode size={17} />
                   </button>
                   <button
                     onClick={(event) => {
@@ -931,7 +1104,117 @@ function App() {
               onRename={renameMeta}
               onDelete={deleteMeta}
             />
+            <MetaEditor
+              title="Теги"
+              type="tag"
+              values={tags}
+              onRename={renameMeta}
+              onDelete={deleteMeta}
+            />
           </aside>
+        </div>
+      )}
+
+      {containersOpen && (
+        <div className="drawer-backdrop" onClick={() => setContainersOpen(false)}>
+          <aside className="drawer meta-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-header">
+              <h2>Контейнеры и ящики</h2>
+              <button onClick={() => setContainersOpen(false)} title="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+            <ContainerEditor
+              containers={containers}
+              onSave={saveContainer}
+              onDelete={deleteContainer}
+              onQr={(container) => setQrTarget({ title: container.name, value: container.code })}
+            />
+          </aside>
+        </div>
+      )}
+
+      {inventoryOpen && (
+        <div className="drawer-backdrop" onClick={() => setInventoryOpen(false)}>
+          <aside className="drawer inventory-drawer" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-header">
+              <h2>Инвентаризация</h2>
+              <button onClick={() => setInventoryOpen(false)} title="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="inventory-controls">
+              <select value={activeInventoryId} onChange={(event) => setActiveInventoryId(event.target.value)}>
+                <option value="">Выберите сессию</option>
+                {inventorySessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.name} · {session.status === 'open' ? 'открыта' : 'закрыта'}
+                  </option>
+                ))}
+              </select>
+              <button className="primary-button" onClick={createInventorySession}>
+                <ClipboardCheck size={18} />
+                Новая
+              </button>
+              {activeInventory?.status === 'open' && (
+                <button className="toggle-button" onClick={() => closeInventorySession(activeInventory.id)}>
+                  <Check size={18} />
+                  Закрыть
+                </button>
+              )}
+            </div>
+            {activeInventoryId ? (
+              <div className="inventory-list">
+                {filteredItems.map((item) => {
+                  const checked = checkedItemIds.has(item.id);
+                  return (
+                    <div className={checked ? 'inventory-row checked' : 'inventory-row'} key={item.id}>
+                      <div>
+                        <strong>{item.name}</strong>
+                        <span>
+                          Сейчас: {formatNumber(item.quantity)} {item.unit}
+                        </span>
+                      </div>
+                      <input
+                        min="0"
+                        step="0.01"
+                        type="number"
+                        value={inventoryQuantities[item.id] ?? item.quantity}
+                        onChange={(event) =>
+                          setInventoryQuantities((current) => ({ ...current, [item.id]: Number(event.target.value) || 0 }))
+                        }
+                      />
+                      <button disabled={activeInventory?.status === 'closed'} onClick={() => checkInventoryItem(item)}>
+                        <Check size={16} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted">Создайте или выберите сессию инвентаризации.</p>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {qrTarget && (
+        <div className="drawer-backdrop" onClick={() => setQrTarget(null)}>
+          <div className="qr-box" onClick={(event) => event.stopPropagation()}>
+            <div className="drawer-header">
+              <h2>QR-код</h2>
+              <button onClick={() => setQrTarget(null)} title="Закрыть">
+                <X size={18} />
+              </button>
+            </div>
+            <h3>{qrTarget.title}</h3>
+            {qrImage && <img src={qrImage} alt={qrTarget.title} />}
+            <code>{qrTarget.value}</code>
+            <button className="primary-button" onClick={() => window.print()}>
+              <Printer size={18} />
+              Печать
+            </button>
+          </div>
         </div>
       )}
 
@@ -990,6 +1273,26 @@ function App() {
                     <option key={entry} value={entry} />
                   ))}
                 </datalist>
+              </label>
+              <label>
+                Контейнер / ящик
+                <select value={draft.containerId} onChange={(event) => setDraft({ ...draft, containerId: event.target.value })}>
+                  <option value="">Без контейнера</option>
+                  {containers.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Теги
+                <textarea
+                  rows={2}
+                  value={draft.tags.join(', ')}
+                  onChange={(event) => setDraft({ ...draft, tags: parseLocations(event.target.value) })}
+                  placeholder="M4, нержавейка, электрика"
+                />
               </label>
               <div className="form-grid">
                 <label>
@@ -1170,6 +1473,99 @@ function MetaEditor({
         <p className="muted">Пока нет значений.</p>
       )}
     </section>
+  );
+}
+
+function ContainerEditor({
+  containers,
+  onSave,
+  onDelete,
+  onQr
+}: {
+  containers: Container[];
+  onSave: (container: Partial<Container>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onQr: (container: Container) => void;
+}) {
+  const [draft, setDraft] = useState<Partial<Container>>({ name: '', location: '', note: '' });
+  const [busy, setBusy] = useState(false);
+
+  async function save(container: Partial<Container>) {
+    setBusy(true);
+    try {
+      await onSave(container);
+      if (!container.id) setDraft({ name: '', location: '', note: '' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="container-editor">
+      <div className="container-create">
+        <input
+          value={draft.name || ''}
+          onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+          placeholder="Ящик с крепежом"
+        />
+        <input
+          value={draft.location || ''}
+          onChange={(event) => setDraft((current) => ({ ...current, location: event.target.value }))}
+          placeholder="Гараж, стеллаж 1"
+        />
+        <button className="primary-button" disabled={busy || !draft.name} onClick={() => save(draft)}>
+          <Plus size={18} />
+          Добавить
+        </button>
+      </div>
+      <div className="container-list">
+        {containers.map((container) => (
+          <ContainerRow
+            key={container.id}
+            container={container}
+            busy={busy}
+            onSave={save}
+            onDelete={onDelete}
+            onQr={onQr}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ContainerRow({
+  container,
+  busy,
+  onSave,
+  onDelete,
+  onQr
+}: {
+  container: Container;
+  busy: boolean;
+  onSave: (container: Partial<Container>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onQr: (container: Container) => void;
+}) {
+  const [draft, setDraft] = useState(container);
+
+  return (
+    <div className="container-row">
+      <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+      <input value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} />
+      <input value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} placeholder="Заметка" />
+      <div>
+        <button disabled={busy} onClick={() => onSave(draft)} title="Сохранить">
+          <Check size={16} />
+        </button>
+        <button onClick={() => onQr(container)} title="QR-код">
+          <QrCode size={16} />
+        </button>
+        <button disabled={busy} onClick={() => onDelete(container.id)} title="Удалить">
+          <Trash2 size={16} />
+        </button>
+      </div>
+    </div>
   );
 }
 
