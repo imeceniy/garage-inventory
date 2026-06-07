@@ -96,6 +96,10 @@ type MultiValueFieldProps = {
   placeholder: string;
   onChange: (values: string[]) => void;
 };
+type SearchableItem = {
+  searchText: string;
+  aliases: string[];
+};
 
 const emptyDraft: Draft = {
   name: '',
@@ -128,6 +132,24 @@ const defaultProjects = ['Для ремонта велосипеда', 'Элек
 const units = ['шт', 'упак', 'м', 'мл', 'г', 'компл'];
 const tokenKey = 'garage_inventory_token';
 const themeKey = 'garage_inventory_theme';
+const searchAliases: Record<string, string[]> = {
+  винт: ['болт', 'шуруп', 'саморез', 'крепеж', 'крепёж'],
+  болт: ['винт', 'крепеж', 'крепёж'],
+  шуруп: ['саморез', 'винт', 'крепеж', 'крепёж'],
+  саморез: ['шуруп', 'винт', 'крепеж', 'крепёж'],
+  гайка: ['крепеж', 'крепёж'],
+  шайба: ['крепеж', 'крепёж'],
+  батарейка: ['аккумулятор', 'элемент', 'питание'],
+  аккумулятор: ['батарейка', 'акб', 'питание'],
+  провод: ['кабель', 'электрика'],
+  кабель: ['провод', 'электрика'],
+  изолента: ['лента', 'изоляция', 'электрика'],
+  стяжка: ['хомут', 'хомуты'],
+  хомут: ['стяжка', 'стяжки'],
+  клей: ['герметик', 'химия'],
+  сопло: ['nozzle', '3d', 'принтер'],
+  филамент: ['пластик', 'pla', 'petg', 'abs', '3d', 'принтер']
+};
 
 function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}` };
@@ -144,6 +166,57 @@ function mergeDelimitedValues(current: string[], value: string) {
   const incoming = parseDelimitedList(value);
   if (!incoming.length) return current;
   return Array.from(new Set([...current, ...incoming]));
+}
+
+function normalizeSearch(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^a-zа-я0-9]+/gi, ' ')
+    .trim();
+}
+
+function searchTokens(value: string) {
+  return normalizeSearch(value).split(/\s+/).filter(Boolean);
+}
+
+function expandSearchToken(token: string) {
+  const normalized = normalizeSearch(token);
+  return [normalized, ...(searchAliases[normalized] || [])];
+}
+
+function isFuzzyMatch(needle: string, candidate: string) {
+  if (needle.length < 4 || candidate.length < 4) return false;
+  if (candidate.includes(needle) || needle.includes(candidate)) return true;
+  if (Math.abs(needle.length - candidate.length) > 2) return false;
+
+  const limit = needle.length <= 6 ? 1 : 2;
+  const previous = Array.from({ length: candidate.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= needle.length; i += 1) {
+    const current = [i];
+    let rowMin = current[0];
+    for (let j = 1; j <= candidate.length; j += 1) {
+      const cost = needle[i - 1] === candidate[j - 1] ? 0 : 1;
+      const value = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+      current[j] = value;
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > limit) return false;
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[candidate.length] <= limit;
+}
+
+function matchesSearch(queryText: string, target: SearchableItem) {
+  const tokens = searchTokens(queryText);
+  if (!tokens.length) return true;
+  const haystack = normalizeSearch(target.searchText);
+  const haystackTokens = searchTokens(`${target.searchText} ${target.aliases.join(' ')}`);
+
+  return tokens.every((token) => {
+    const variants = expandSearchToken(token);
+    return variants.some((variant) => haystack.includes(variant) || haystackTokens.some((candidate) => isFuzzyMatch(variant, candidate)));
+  });
 }
 
 function itemLocations(item: Pick<Item, 'location' | 'locations'>) {
@@ -235,6 +308,7 @@ function App() {
   const [containersOpen, setContainersOpen] = useState(false);
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [scannerMode, setScannerMode] = useState<'search' | 'draft' | null>(null);
+  const [foundContainerId, setFoundContainerId] = useState('');
   const [qrTarget, setQrTarget] = useState<QrTarget>(null);
   const [qrImage, setQrImage] = useState('');
   const [printMode, setPrintMode] = useState<'shopping' | 'qr'>('shopping');
@@ -246,6 +320,21 @@ function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem(themeKey) || 'light');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scannerDoneRef = useRef(false);
+
+  function findContainerByCode(value: string) {
+    const normalized = value.trim().toLowerCase();
+    return containers.find((container) => {
+      const code = container.code.trim().toLowerCase();
+      return code === normalized || `container:${container.id}`.toLowerCase() === normalized || container.id.toLowerCase() === normalized;
+    });
+  }
+
+  function openContainer(container: Container) {
+    setFoundContainerId(container.id);
+    setContainerId(container.id);
+    setQuery('');
+    setOnlyLow(false);
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -319,7 +408,13 @@ function App() {
             if (scannerMode === 'draft') {
               setDraft((current) => ({ ...current, barcode: value }));
             } else {
-              setQuery(value);
+              const container = findContainerByCode(value);
+              if (container) {
+                openContainer(container);
+              } else {
+                setFoundContainerId('');
+                setQuery(value);
+              }
             }
             setScannerMode(null);
             return;
@@ -341,7 +436,7 @@ function App() {
       window.cancelAnimationFrame(frame);
       stream?.getTracks().forEach((track) => track.stop());
     };
-  }, [scannerMode]);
+  }, [scannerMode, containers]);
 
   // Shared API wrapper handles auth expiry and consistent error messages.
   async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -440,8 +535,8 @@ function App() {
     setMeta({ locations: [], projects: [], tags: [] });
   }
 
-  function startCreate() {
-    setDraft(emptyDraft);
+  function startCreate(container?: Container) {
+    setDraft(container ? { ...emptyDraft, containerId: container.id, locations: container.location ? [container.location] : [], location: container.location } : emptyDraft);
     setEditingId(null);
     setItemHistory([]);
     setPanelOpen(true);
@@ -527,8 +622,21 @@ function App() {
           run: () => adjustItem(updated, -actualDelta, false)
         });
       }
+      return updated;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось изменить количество');
+      return null;
+    }
+  }
+
+  function packageAmount(item: Pick<Item, 'id' | 'minQuantity'>) {
+    return Math.max(0.01, adjustBy[item.id] || item.minQuantity || 1);
+  }
+
+  async function adjustOpenItem(item: Item, amount: number) {
+    const updated = await adjustItem(item, amount);
+    if (updated) {
+      setDraft((current) => ({ ...current, quantity: updated.quantity }));
     }
   }
 
@@ -647,6 +755,8 @@ function App() {
 
   const activeInventory = inventorySessions.find((session) => session.id === activeInventoryId);
   const checkedItemIds = new Set(inventoryChecks.map((check) => check.itemId));
+  const activeEditItem = editingId ? items.find((item) => item.id === editingId) : null;
+  const foundContainer = containers.find((container) => container.id === foundContainerId);
 
   function printShoppingList() {
     setPrintMode('shopping');
@@ -664,7 +774,10 @@ function App() {
     const filtered = items.filter((item) => {
       const low = item.quantity <= item.minQuantity;
       const locations = itemLocations(item);
+      const container = containers.find((entry) => entry.id === item.containerId);
       const haystack = [
+        item.id,
+        `item:${item.id}`,
         item.name,
         item.category,
         item.location,
@@ -672,12 +785,14 @@ function App() {
         item.barcode,
         item.project,
         item.tags.join(' '),
-        containers.find((container) => container.id === item.containerId)?.name || '',
+        container?.name || '',
+        container?.code || '',
+        container?.location || '',
         item.note
       ]
-        .join(' ')
-        .toLowerCase();
-      const textMatch = haystack.includes(search);
+        .join(' ');
+      const aliases = [item.category, item.project, ...item.tags].flatMap(searchTokens).flatMap((token) => searchAliases[token] || []);
+      const textMatch = matchesSearch(search, { searchText: haystack, aliases });
       const categoryMatch = category === 'Все' || item.category === category;
       const projectMatch = project === 'Все' || item.project === project;
       const locationMatch = location === 'Все' || locations.includes(location);
@@ -752,7 +867,7 @@ function App() {
           <button className="ghost-button" onClick={logout} title="Выйти">
             <LogOut size={18} />
           </button>
-          <button className="primary-button" onClick={startCreate}>
+          <button className="primary-button" onClick={() => startCreate()}>
             <PackagePlus size={18} />
             Добавить
           </button>
@@ -810,7 +925,13 @@ function App() {
 
         <label className="select-field">
           <Boxes size={18} />
-          <select value={containerId} onChange={(event) => setContainerId(event.target.value)}>
+          <select
+            value={containerId}
+            onChange={(event) => {
+              setContainerId(event.target.value);
+              setFoundContainerId(event.target.value === 'Все' ? '' : event.target.value);
+            }}
+          >
             <option>Все</option>
             {containers.map((entry) => (
               <option key={entry.id} value={entry.id}>
@@ -842,6 +963,32 @@ function App() {
         </button>
       </section>
 
+      {foundContainer && (
+        <section className="found-container-panel">
+          <div>
+            <strong>{foundContainer.name}</strong>
+            <span>
+              {items.filter((item) => item.containerId === foundContainer.id).length} позиций
+              {foundContainer.location && ` · ${foundContainer.location}`}
+            </span>
+          </div>
+          <button className="ghost-button" onClick={() => startCreate(foundContainer)}>
+            <PackagePlus size={17} />
+            Добавить сюда
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => {
+              setFoundContainerId('');
+              setContainerId('Все');
+            }}
+          >
+            <X size={17} />
+            Сбросить
+          </button>
+        </section>
+      )}
+
       {error && (
         <div className="toast">
           <span>{error}</span>
@@ -872,6 +1019,7 @@ function App() {
           {filteredItems.map((item) => {
             const low = item.quantity <= item.minQuantity;
             const step = Math.max(0.01, adjustBy[item.id] || 1);
+            const pack = packageAmount(item);
             const restock = Math.max(0, item.minQuantity - item.quantity);
             const container = containers.find((entry) => entry.id === item.containerId);
             return (
@@ -957,6 +1105,27 @@ function App() {
                     onChange={(event) => setAdjustBy((current) => ({ ...current, [item.id]: Number(event.target.value) || 1 }))}
                   />
                 </label>
+                <div className="quick-quantity-actions">
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      adjustItem(item, pack);
+                    }}
+                    title={`Добавить упаковку: ${formatNumber(pack)} ${item.unit}`}
+                  >
+                    + упаковка
+                  </button>
+                  <button
+                    disabled={item.quantity <= 0}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      adjustItem(item, -item.quantity);
+                    }}
+                    title="Списать остаток до нуля"
+                  >
+                    до 0
+                  </button>
+                </div>
                 <dl>
                   <div>
                     <dt>Минимум</dt>
@@ -1346,6 +1515,22 @@ function App() {
                   </select>
                 </label>
               </div>
+              {activeEditItem && (
+                <div className="quick-quantity-actions wide">
+                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, -1)} disabled={draft.quantity <= 0}>
+                    -1
+                  </button>
+                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, 1)}>
+                    +1
+                  </button>
+                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, packageAmount(activeEditItem))}>
+                    + упаковка
+                  </button>
+                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, -draft.quantity)} disabled={draft.quantity <= 0}>
+                    до 0
+                  </button>
+                </div>
+              )}
               <label>
                 Минимальный остаток
                 <input

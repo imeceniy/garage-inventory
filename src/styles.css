@@ -300,6 +300,29 @@ textarea:focus {
   margin-bottom: 16px;
 }
 
+.found-container-panel {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px var(--shadow);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  margin-bottom: 18px;
+  padding: 12px;
+}
+
+.found-container-panel div {
+  display: grid;
+  gap: 3px;
+}
+
+.found-container-panel span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .undo-toast {
   background: color-mix(in srgb, var(--primary) 12%, var(--surface));
   border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
@@ -467,6 +490,30 @@ textarea:focus {
   min-width: 0;
   overflow-wrap: anywhere;
   text-align: center;
+}
+
+.quick-quantity-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.quick-quantity-actions.wide {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.quick-quantity-actions button {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.quick-quantity-actions button:disabled {
+  color: var(--muted);
+  opacity: 0.55;
 }
 
 .adjust-field {
@@ -923,8 +970,13 @@ dd {
   .inventory-controls,
   .container-create,
   .container-row,
+  .found-container-panel,
   .inventory-row {
     grid-template-columns: 1fr;
+  }
+
+  .quick-quantity-actions.wide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .toggle-button,
