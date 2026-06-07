@@ -126,10 +126,10 @@ function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}` };
 }
 
-function parseLocations(value: string) {
+function parseDelimitedList(value: string) {
   return value
-    .split(/\n|,/)
-    .map((entry) => entry.trim())
+    .split(/[\n,;]+/)
+    .map((entry) => entry.trim().replace(/^#+/, '').trim())
     .filter(Boolean);
 }
 
@@ -224,6 +224,7 @@ function App() {
   const [scannerMode, setScannerMode] = useState<'search' | 'draft' | null>(null);
   const [qrTarget, setQrTarget] = useState<QrTarget>(null);
   const [qrImage, setQrImage] = useState('');
+  const [printMode, setPrintMode] = useState<'shopping' | 'qr'>('shopping');
   const [activeInventoryId, setActiveInventoryId] = useState('');
   const [inventoryQuantities, setInventoryQuantities] = useState<Record<string, number>>({});
   const [undo, setUndo] = useState<UndoAction | null>(null);
@@ -634,6 +635,16 @@ function App() {
   const activeInventory = inventorySessions.find((session) => session.id === activeInventoryId);
   const checkedItemIds = new Set(inventoryChecks.map((check) => check.itemId));
 
+  function printShoppingList() {
+    setPrintMode('shopping');
+    window.setTimeout(() => window.print(), 0);
+  }
+
+  function printQrCode() {
+    setPrintMode('qr');
+    window.setTimeout(() => window.print(), 0);
+  }
+
   // Filtering stays client-side because the inventory is expected to be small.
   const filteredItems = useMemo(() => {
     const search = query.trim().toLowerCase();
@@ -713,7 +724,7 @@ function App() {
           >
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          <button className="ghost-button" onClick={() => window.print()} title="Печать списка покупок">
+          <button className="ghost-button" onClick={printShoppingList} title="Печать списка покупок">
             <Printer size={18} />
           </button>
           <button className="ghost-button" onClick={() => setMetaOpen(true)} title="Редактор мест и проектов">
@@ -992,7 +1003,7 @@ function App() {
           <section className="shopping-panel">
             <div className="panel-heading">
               <h2>Список покупок</h2>
-              <button onClick={() => window.print()} title="Печать">
+              <button onClick={printShoppingList} title="Печать">
                 <Printer size={17} />
               </button>
             </div>
@@ -1046,7 +1057,7 @@ function App() {
         </section>
       )}
 
-      <section className="print-shopping">
+      <section className={printMode === 'shopping' ? 'print-shopping active' : 'print-shopping'}>
         <h1>Список покупок</h1>
         <p>{formatDate(new Date().toISOString())}</p>
         <table>
@@ -1198,6 +1209,16 @@ function App() {
         </div>
       )}
 
+      <section className={printMode === 'qr' ? 'print-qr active' : 'print-qr'}>
+        {qrTarget && (
+          <>
+            <h1>{qrTarget.title}</h1>
+            {qrImage && <img src={qrImage} alt={qrTarget.title} />}
+            <p>{qrTarget.value}</p>
+          </>
+        )}
+      </section>
+
       {qrTarget && (
         <div className="drawer-backdrop" onClick={() => setQrTarget(null)}>
           <div className="qr-box" onClick={(event) => event.stopPropagation()}>
@@ -1210,7 +1231,7 @@ function App() {
             <h3>{qrTarget.title}</h3>
             {qrImage && <img src={qrImage} alt={qrTarget.title} />}
             <code>{qrTarget.value}</code>
-            <button className="primary-button" onClick={() => window.print()}>
+            <button className="primary-button" onClick={printQrCode}>
               <Printer size={18} />
               Печать
             </button>
@@ -1290,8 +1311,8 @@ function App() {
                 <textarea
                   rows={2}
                   value={draft.tags.join(', ')}
-                  onChange={(event) => setDraft({ ...draft, tags: parseLocations(event.target.value) })}
-                  placeholder="M4, нержавейка, электрика"
+                  onChange={(event) => setDraft({ ...draft, tags: parseDelimitedList(event.target.value) })}
+                  placeholder="M4, нержавейка; электрика&#10;#расходники"
                 />
               </label>
               <div className="form-grid">
@@ -1329,14 +1350,15 @@ function App() {
                 <textarea
                   rows={3}
                   value={draft.locations.join('\n')}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const locations = parseDelimitedList(event.target.value);
                     setDraft({
                       ...draft,
-                      locations: parseLocations(event.target.value),
-                      location: parseLocations(event.target.value)[0] || ''
-                    })
-                  }
-                  placeholder="Гараж, стеллаж 2&#10;Мастерская, ящик 4"
+                      locations,
+                      location: locations[0] || ''
+                    });
+                  }}
+                  placeholder="Гараж / стеллаж 2&#10;Мастерская; ящик 4&#10;Шкаф, полка 1"
                 />
               </label>
               <label>

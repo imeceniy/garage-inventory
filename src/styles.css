@@ -847,7 +847,8 @@ dd {
   padding: 8px;
 }
 
-.print-shopping {
+.print-shopping,
+.print-qr {
   display: none;
 }
 
@@ -903,11 +904,17 @@ dd {
     background: white;
   }
 
-  .app-shell > :not(.print-shopping) {
+  .app-shell > :not(.print-shopping):not(.print-qr) {
     display: none !important;
   }
 
-  .print-shopping {
+  .print-shopping,
+  .print-qr {
+    display: none;
+  }
+
+  .print-shopping.active,
+  .print-qr.active {
     color: #111;
     display: block;
     font-family: Arial, sans-serif;
@@ -938,6 +945,32 @@ dd {
 
   .print-shopping th {
     background: #eee;
+  }
+
+  .print-qr.active {
+    align-items: center;
+    display: grid;
+    gap: 14px;
+    justify-items: center;
+    min-height: 90vh;
+    text-align: center;
+  }
+
+  .print-qr h1 {
+    font-size: 28px;
+    margin: 0;
+  }
+
+  .print-qr img {
+    height: 320px;
+    width: 320px;
+  }
+
+  .print-qr p {
+    color: #444;
+    font-size: 14px;
+    margin: 0;
+    overflow-wrap: anywhere;
   }
 
   .qr-box {
