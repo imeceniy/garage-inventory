@@ -658,6 +658,46 @@ dd {
   grid-template-columns: 1fr 42px;
 }
 
+.multi-value-field {
+  display: grid;
+  gap: 8px;
+}
+
+.chip-input-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 42px;
+}
+
+.chip-input-row button {
+  align-items: center;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  display: inline-flex;
+  justify-content: center;
+}
+
+.editable-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.editable-chip-list button {
+  align-items: center;
+  background: var(--primary-soft);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--primary);
+  display: inline-flex;
+  font-size: 0.86rem;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
 .item-history,
 .meta-section {
   border-top: 1px solid var(--border);

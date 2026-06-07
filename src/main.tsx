@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 declare module 'react-dom/client' {
@@ -89,6 +89,13 @@ type InventoryCheck = {
   checkedAt: string;
 };
 type QrTarget = { title: string; value: string } | null;
+type MultiValueFieldProps = {
+  label: string;
+  values: string[];
+  suggestions: string[];
+  placeholder: string;
+  onChange: (values: string[]) => void;
+};
 
 const emptyDraft: Draft = {
   name: '',
@@ -131,6 +138,12 @@ function parseDelimitedList(value: string) {
     .split(/[\n,;]+/)
     .map((entry) => entry.trim().replace(/^#+/, '').trim())
     .filter(Boolean);
+}
+
+function mergeDelimitedValues(current: string[], value: string) {
+  const incoming = parseDelimitedList(value);
+  if (!incoming.length) return current;
+  return Array.from(new Set([...current, ...incoming]));
 }
 
 function itemLocations(item: Pick<Item, 'location' | 'locations'>) {
@@ -1306,15 +1319,13 @@ function App() {
                   ))}
                 </select>
               </label>
-              <label>
-                Теги
-                <textarea
-                  rows={2}
-                  value={draft.tags.join(', ')}
-                  onChange={(event) => setDraft({ ...draft, tags: parseDelimitedList(event.target.value) })}
-                  placeholder="M4, нержавейка; электрика&#10;#расходники"
-                />
-              </label>
+              <MultiValueField
+                label="Теги"
+                values={draft.tags}
+                suggestions={tags}
+                placeholder="M4, нержавейка, #расходники"
+                onChange={(values) => setDraft({ ...draft, tags: values })}
+              />
               <div className="form-grid">
                 <label>
                   Количество
@@ -1345,22 +1356,19 @@ function App() {
                   onChange={(event) => setDraft({ ...draft, minQuantity: Number(event.target.value) })}
                 />
               </label>
-              <label>
-                Места хранения
-                <textarea
-                  rows={3}
-                  value={draft.locations.join('\n')}
-                  onChange={(event) => {
-                    const locations = parseDelimitedList(event.target.value);
-                    setDraft({
-                      ...draft,
-                      locations,
-                      location: locations[0] || ''
-                    });
-                  }}
-                  placeholder="Гараж / стеллаж 2&#10;Мастерская; ящик 4&#10;Шкаф, полка 1"
-                />
-              </label>
+              <MultiValueField
+                label="Места хранения"
+                values={draft.locations}
+                suggestions={locations}
+                placeholder="Гараж / стеллаж 2"
+                onChange={(values) =>
+                  setDraft({
+                    ...draft,
+                    locations: values,
+                    location: values[0] || ''
+                  })
+                }
+              />
               <label>
                 QR / штрихкод
                 <span className="inline-input">
@@ -1425,6 +1433,68 @@ function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function MultiValueField({ label, values, suggestions, placeholder, onChange }: MultiValueFieldProps) {
+  const [entry, setEntry] = useState('');
+  const listId = useId();
+  const availableSuggestions = suggestions.filter((suggestion) => !values.includes(suggestion));
+
+  function addValue(value = entry) {
+    const next = mergeDelimitedValues(values, value);
+    onChange(next);
+    setEntry('');
+  }
+
+  function removeValue(value: string) {
+    onChange(values.filter((entryValue) => entryValue !== value));
+  }
+
+  return (
+    <label className="multi-value-field">
+      {label}
+      <span className="chip-input-row">
+        <input
+          list={listId}
+          value={entry}
+          onChange={(event) => setEntry(event.target.value)}
+          onBlur={() => addValue()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ',' || event.key === ';') {
+              event.preventDefault();
+              addValue();
+            }
+          }}
+          onPaste={(event) => {
+            const pasted = event.clipboardData.getData('text');
+            if (parseDelimitedList(pasted).length > 1) {
+              event.preventDefault();
+              addValue(pasted);
+            }
+          }}
+          placeholder={placeholder}
+        />
+        <button type="button" onClick={() => addValue()} title="Добавить">
+          <Plus size={17} />
+        </button>
+      </span>
+      <datalist id={listId}>
+        {availableSuggestions.map((suggestion) => (
+          <option key={suggestion} value={suggestion} />
+        ))}
+      </datalist>
+      {values.length > 0 && (
+        <span className="editable-chip-list">
+          {values.map((value) => (
+            <button key={value} type="button" onClick={() => removeValue(value)} title="Удалить">
+              {value}
+              <X size={14} />
+            </button>
+          ))}
+        </span>
+      )}
+    </label>
   );
 }
 
