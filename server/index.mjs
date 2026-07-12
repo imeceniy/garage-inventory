@@ -99,6 +99,97 @@ function toItem(row) {
   };
 }
 
+function toStockBalance(row) {
+  return {
+    id: row.id,
+    itemId: row.itemId,
+    containerId: row.containerId,
+    location: row.location,
+    quantity: row.quantity,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function stockBalances(itemId) {
+  return db
+    .prepare('SELECT * FROM stock_balances WHERE itemId = ? ORDER BY createdAt, id')
+    .all(itemId)
+    .map(toStockBalance);
+}
+
+function toItemWithBalances(row) {
+  const item = toItem(row);
+  return { ...item, balances: stockBalances(item.id) };
+}
+
+function setItemTotalQuantity(item, targetQuantity, timestamp = nowIso()) {
+  const target = Math.max(0, targetQuantity);
+  const balances = stockBalances(item.id);
+
+  if (!balances.length) {
+    db.prepare(`
+      INSERT INTO stock_balances (id, itemId, containerId, location, quantity, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(crypto.randomUUID(), item.id, item.containerId || '', item.location || '', target, timestamp, timestamp);
+  } else {
+    const currentTotal = balances.reduce((sum, balance) => sum + balance.quantity, 0);
+    let delta = target - currentTotal;
+    if (delta > 0) {
+      const primary = balances[0];
+      db.prepare('UPDATE stock_balances SET quantity = ?, updatedAt = ? WHERE id = ?').run(primary.quantity + delta, timestamp, primary.id);
+    } else if (delta < 0) {
+      let remaining = Math.abs(delta);
+      for (const balance of balances) {
+        if (remaining <= 0) break;
+        const deducted = Math.min(balance.quantity, remaining);
+        db.prepare('UPDATE stock_balances SET quantity = ?, updatedAt = ? WHERE id = ?').run(balance.quantity - deducted, timestamp, balance.id);
+        remaining -= deducted;
+      }
+    }
+  }
+
+  db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(target, timestamp, item.id);
+}
+
+function syncItemQuantity(itemId, timestamp = nowIso()) {
+  const total = db.prepare('SELECT COALESCE(SUM(quantity), 0) AS total FROM stock_balances WHERE itemId = ?').get(itemId).total;
+  db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(total, timestamp, itemId);
+  return total;
+}
+
+function recordStockMovement(item, fromBalanceId, toBalanceId, amount, action) {
+  db.prepare(`
+    INSERT INTO stock_movements (id, itemId, itemName, fromBalanceId, toBalanceId, amount, action, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(crypto.randomUUID(), item.id, item.name, fromBalanceId || '', toBalanceId || '', amount, action, nowIso());
+}
+
+function moveBalanceIdentity(balance, containerId, location, timestamp) {
+  const duplicate = db.prepare(`
+    SELECT * FROM stock_balances
+    WHERE itemId = ? AND containerId = ? AND location = ? AND id <> ?
+  `).get(balance.itemId, containerId, location, balance.id);
+
+  if (duplicate) {
+    db.prepare('UPDATE stock_balances SET quantity = quantity + ?, updatedAt = ? WHERE id = ?').run(balance.quantity, timestamp, duplicate.id);
+    db.prepare('DELETE FROM stock_balances WHERE id = ?').run(balance.id);
+    return;
+  }
+
+  db.prepare('UPDATE stock_balances SET containerId = ?, location = ?, updatedAt = ? WHERE id = ?').run(
+    containerId,
+    location,
+    timestamp,
+    balance.id
+  );
+}
+
+function renameBalanceLocation(from, to, timestamp) {
+  const balances = db.prepare('SELECT * FROM stock_balances WHERE location = ?').all(from).map(toStockBalance);
+  for (const balance of balances) moveBalanceIdentity(balance, balance.containerId, to, timestamp);
+}
+
 function toContainer(row) {
   return {
     id: row.id,
@@ -260,7 +351,7 @@ app.get('/api/auth/me', requireAuth, (_req, res) => {
 // Inventory CRUD endpoints.
 app.get('/api/items', requireAuth, (_req, res) => {
   const rows = db.prepare('SELECT * FROM items ORDER BY lower(name), createdAt').all();
-  res.json(rows.map(toItem));
+  res.json(rows.map(toItemWithBalances));
 });
 
 app.get('/api/history', requireAuth, (_req, res) => {
@@ -323,6 +414,7 @@ app.post('/api/meta/rename', requireAuth, (req, res) => {
         update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
       }
     }
+    if (type === 'location') renameBalanceLocation(from, to, timestamp);
   });
 
   res.json({ ok: true });
@@ -358,6 +450,7 @@ app.post('/api/meta/delete', requireAuth, (req, res) => {
         update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
       }
     }
+    if (type === 'location') renameBalanceLocation(value, '', timestamp);
   });
 
   res.json({ ok: true });
@@ -420,7 +513,10 @@ app.patch('/api/containers/:id', requireAuth, (req, res) => {
 
 app.delete('/api/containers/:id', requireAuth, (req, res) => {
   withTransaction(db, () => {
-    db.prepare('UPDATE items SET containerId = ?, updatedAt = ? WHERE containerId = ?').run('', nowIso(), req.params.id);
+    const timestamp = nowIso();
+    const balances = db.prepare('SELECT * FROM stock_balances WHERE containerId = ?').all(req.params.id).map(toStockBalance);
+    for (const balance of balances) moveBalanceIdentity(balance, '', balance.location, timestamp);
+    db.prepare('UPDATE items SET containerId = ?, updatedAt = ? WHERE containerId = ?').run('', timestamp, req.params.id);
     db.prepare('DELETE FROM containers WHERE id = ?').run(req.params.id);
   });
   res.status(204).end();
@@ -493,7 +589,7 @@ app.post('/api/inventory/sessions/:id/checks', requireAuth, (req, res) => {
     );
 
     if (actualQuantity !== current.quantity) {
-      db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(actualQuantity, timestamp, current.id);
+      setItemTotalQuantity(current, actualQuantity, timestamp);
       recordHistory({ ...current, quantity: actualQuantity }, actualQuantity - current.quantity, 'inventory');
     }
   });
@@ -534,7 +630,9 @@ app.post('/api/items', requireAuth, (req, res) => {
       );
 
       const row = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
-      const created = toItem(row);
+      const baseItem = toItem(row);
+      setItemTotalQuantity(baseItem, baseItem.quantity, timestamp);
+      const created = toItemWithBalances(db.prepare('SELECT * FROM items WHERE id = ?').get(id));
       if (created.quantity > 0) recordHistory(created, created.quantity, 'create');
       return created;
     });
@@ -578,8 +676,9 @@ app.patch('/api/items/:id', requireAuth, (req, res) => {
         req.params.id
       );
 
+      setItemTotalQuantity(previous, update.quantity, update.updatedAt);
       const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-      const updated = toItem(row);
+      const updated = toItemWithBalances(row);
       const delta = updated.quantity - previous.quantity;
       if (delta !== 0) recordHistory(updated, delta, 'edit');
       return updated;
@@ -601,10 +700,11 @@ app.post('/api/items/:id/adjust', requireAuth, (req, res) => {
     const existing = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
     if (!existing) return null;
 
-    const quantity = Math.max(0, existing.quantity + amount);
-    db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(quantity, nowIso(), req.params.id);
+    const current = toItem(existing);
+    const quantity = Math.max(0, current.quantity + amount);
+    setItemTotalQuantity(current, quantity);
     const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-    const updated = toItem(row);
+    const updated = toItemWithBalances(row);
     const actualDelta = quantity - existing.quantity;
     if (actualDelta !== 0) recordHistory(updated, actualDelta, actualDelta > 0 ? 'add' : 'subtract');
     return updated;
@@ -615,6 +715,142 @@ app.post('/api/items/:id/adjust', requireAuth, (req, res) => {
     return;
   }
   res.json(saved);
+});
+
+app.get('/api/items/:id/movements', requireAuth, (req, res) => {
+  const rows = db.prepare('SELECT * FROM stock_movements WHERE itemId = ? ORDER BY createdAt DESC').all(req.params.id);
+  res.json(rows);
+});
+
+app.post('/api/items/:id/balances', requireAuth, (req, res) => {
+  const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
+  if (!row) {
+    res.status(404).json({ error: 'Позиция не найдена' });
+    return;
+  }
+
+  const item = toItem(row);
+  const containerId = normalizeText(req.body?.containerId);
+  const container = containerId ? db.prepare('SELECT * FROM containers WHERE id = ?').get(containerId) : null;
+  if (containerId && !container) {
+    res.status(400).json({ error: 'Контейнер не найден' });
+    return;
+  }
+
+  const location = normalizeText(req.body?.location) || container?.location || '';
+  const quantity = Math.max(0, normalizeNumber(req.body?.quantity));
+  const timestamp = nowIso();
+
+  try {
+    const saved = withTransaction(db, () => {
+      const balanceId = crypto.randomUUID();
+      db.prepare(`
+        INSERT INTO stock_balances (id, itemId, containerId, location, quantity, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(balanceId, item.id, containerId, location, quantity, timestamp, timestamp);
+      const total = syncItemQuantity(item.id, timestamp);
+      const updated = toItemWithBalances(db.prepare('SELECT * FROM items WHERE id = ?').get(item.id));
+      if (quantity > 0) {
+        recordHistory({ ...updated, quantity: total }, quantity, 'add');
+        recordStockMovement(item, '', balanceId, quantity, 'receive');
+      }
+      return updated;
+    });
+    res.status(201).json(saved);
+  } catch (error) {
+    res.status(400).json({ error: String(error.message || error).includes('UNIQUE') ? 'Такое место уже добавлено' : error.message });
+  }
+});
+
+app.patch('/api/items/:id/balances/:balanceId', requireAuth, (req, res) => {
+  const itemRow = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
+  const balanceRow = db.prepare('SELECT * FROM stock_balances WHERE id = ? AND itemId = ?').get(req.params.balanceId, req.params.id);
+  if (!itemRow || !balanceRow) {
+    res.status(404).json({ error: 'Позиция или место остатка не найдено' });
+    return;
+  }
+
+  const item = toItem(itemRow);
+  const balance = toStockBalance(balanceRow);
+  const containerId = req.body?.containerId === undefined ? balance.containerId : normalizeText(req.body.containerId);
+  const container = containerId ? db.prepare('SELECT * FROM containers WHERE id = ?').get(containerId) : null;
+  if (containerId && !container) {
+    res.status(400).json({ error: 'Контейнер не найден' });
+    return;
+  }
+
+  const location = req.body?.location === undefined ? balance.location : normalizeText(req.body.location) || container?.location || '';
+  const quantity = req.body?.quantity === undefined ? balance.quantity : Math.max(0, normalizeNumber(req.body.quantity, balance.quantity));
+  const timestamp = nowIso();
+
+  try {
+    const saved = withTransaction(db, () => {
+      db.prepare('UPDATE stock_balances SET containerId = ?, location = ?, quantity = ?, updatedAt = ? WHERE id = ?').run(
+        containerId,
+        location,
+        quantity,
+        timestamp,
+        balance.id
+      );
+      const total = syncItemQuantity(item.id, timestamp);
+      const delta = quantity - balance.quantity;
+      const updated = toItemWithBalances(db.prepare('SELECT * FROM items WHERE id = ?').get(item.id));
+      if (delta !== 0) {
+        recordHistory({ ...updated, quantity: total }, delta, delta > 0 ? 'add' : 'subtract');
+        recordStockMovement(item, delta < 0 ? balance.id : '', delta > 0 ? balance.id : '', Math.abs(delta), 'adjust');
+      }
+      return updated;
+    });
+    res.json(saved);
+  } catch (error) {
+    res.status(400).json({ error: String(error.message || error).includes('UNIQUE') ? 'Такое место уже добавлено' : error.message });
+  }
+});
+
+app.post('/api/items/:id/transfer', requireAuth, (req, res) => {
+  const amount = normalizeNumber(req.body?.amount, Number.NaN);
+  const fromBalanceId = normalizeText(req.body?.fromBalanceId);
+  const toBalanceId = normalizeText(req.body?.toBalanceId);
+  if (!Number.isFinite(amount) || amount <= 0 || !fromBalanceId || !toBalanceId || fromBalanceId === toBalanceId) {
+    res.status(400).json({ error: 'Некорректное перемещение' });
+    return;
+  }
+
+  const itemRow = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
+  const fromRow = db.prepare('SELECT * FROM stock_balances WHERE id = ? AND itemId = ?').get(fromBalanceId, req.params.id);
+  const toRow = db.prepare('SELECT * FROM stock_balances WHERE id = ? AND itemId = ?').get(toBalanceId, req.params.id);
+  if (!itemRow || !fromRow || !toRow) {
+    res.status(404).json({ error: 'Позиция или место остатка не найдено' });
+    return;
+  }
+  if (fromRow.quantity < amount) {
+    res.status(400).json({ error: 'Недостаточно остатка для перемещения' });
+    return;
+  }
+
+  const item = toItem(itemRow);
+  const timestamp = nowIso();
+  const saved = withTransaction(db, () => {
+    db.prepare('UPDATE stock_balances SET quantity = quantity - ?, updatedAt = ? WHERE id = ?').run(amount, timestamp, fromBalanceId);
+    db.prepare('UPDATE stock_balances SET quantity = quantity + ?, updatedAt = ? WHERE id = ?').run(amount, timestamp, toBalanceId);
+    recordStockMovement(item, fromBalanceId, toBalanceId, amount, 'transfer');
+    return toItemWithBalances(db.prepare('SELECT * FROM items WHERE id = ?').get(item.id));
+  });
+  res.json(saved);
+});
+
+app.delete('/api/items/:id/balances/:balanceId', requireAuth, (req, res) => {
+  const balance = db.prepare('SELECT * FROM stock_balances WHERE id = ? AND itemId = ?').get(req.params.balanceId, req.params.id);
+  if (!balance) {
+    res.status(404).json({ error: 'Место остатка не найдено' });
+    return;
+  }
+  if (balance.quantity > 0) {
+    res.status(400).json({ error: 'Сначала переместите или спишите остаток' });
+    return;
+  }
+  db.prepare('DELETE FROM stock_balances WHERE id = ?').run(balance.id);
+  res.status(204).end();
 });
 
 app.delete('/api/items/:id', requireAuth, (req, res) => {

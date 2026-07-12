@@ -1,3 +1,13 @@
+export type StockBalance = {
+  id: string;
+  itemId: string;
+  containerId: string;
+  location: string;
+  quantity: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Item = {
   id: string;
   name: string;
@@ -13,6 +23,7 @@ export type Item = {
   photo: string;
   minQuantity: number;
   note: string;
+  balances: StockBalance[];
   createdAt: string;
   updatedAt: string;
 };
@@ -27,7 +38,7 @@ export type HistoryEntry = {
   createdAt: string;
 };
 
-export type Draft = Omit<Item, 'id' | 'createdAt' | 'updatedAt'>;
+export type Draft = Omit<Item, 'id' | 'balances' | 'createdAt' | 'updatedAt'>;
 export type ViewMode = 'cards' | 'list';
 export type SortMode = 'name' | 'quantity' | 'low' | 'updated' | 'location';
 export type MetaType = 'location' | 'project' | 'tag';

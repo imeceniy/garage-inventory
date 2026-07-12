@@ -29,6 +29,7 @@ disappear exactly when needed.
 - Browser camera scanning for QR and supported barcodes when available over HTTPS.
 - QR code generation for items and containers.
 - Multiple storage locations per item.
+- Per-location and per-container stock balances with transfers between them.
 - Storage location and project editors for bulk rename/delete.
 - Tags with filtering and bulk rename/delete.
 - Container/box entities with their own QR codes.

@@ -28,6 +28,7 @@ import {
 import { ContainerEditor } from './components/ContainerEditor';
 import { ItemCard } from './components/ItemCard';
 import { MetaEditor, MultiValueField } from './components/MetadataEditors';
+import { StockBalanceEditor } from './components/StockBalanceEditor';
 import { categories, defaultProjects, emptyDraft, themeKey, tokenKey, units } from './domain/constants';
 import type {
   Container,
@@ -315,7 +316,7 @@ function App() {
   }
 
   async function startEdit(item: Item) {
-    const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...rest } = item;
+    const { id: _id, balances: _balances, createdAt: _createdAt, updatedAt: _updatedAt, ...rest } = item;
     setDraft(rest);
     setEditingId(item.id);
     setItemHistory([]);
@@ -414,8 +415,58 @@ function App() {
     }
   }
 
+  function applyStockUpdate(updated: Item) {
+    setItems((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    setDraft((current) => ({ ...current, quantity: updated.quantity }));
+  }
+
+  async function createStockBalance(itemId: string, input: { containerId: string; location: string; quantity: number }) {
+    try {
+      const updated = await request<Item>(`/api/items/${itemId}/balances`, { method: 'POST', body: JSON.stringify(input) });
+      applyStockUpdate(updated);
+      setHistory(await request<HistoryEntry[]>('/api/history'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось добавить место остатка');
+      throw err;
+    }
+  }
+
+  async function updateStockBalance(itemId: string, balanceId: string, input: { containerId: string; location: string; quantity: number }) {
+    try {
+      const updated = await request<Item>(`/api/items/${itemId}/balances/${balanceId}`, { method: 'PATCH', body: JSON.stringify(input) });
+      applyStockUpdate(updated);
+      setHistory(await request<HistoryEntry[]>('/api/history'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось изменить остаток');
+      throw err;
+    }
+  }
+
+  async function transferStock(itemId: string, fromBalanceId: string, toBalanceId: string, amount: number) {
+    try {
+      const updated = await request<Item>(`/api/items/${itemId}/transfer`, {
+        method: 'POST',
+        body: JSON.stringify({ fromBalanceId, toBalanceId, amount })
+      });
+      applyStockUpdate(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось переместить остаток');
+      throw err;
+    }
+  }
+
+  async function deleteStockBalance(itemId: string, balanceId: string) {
+    try {
+      await request(`/api/items/${itemId}/balances/${balanceId}`, { method: 'DELETE' });
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить место остатка');
+      throw err;
+    }
+  }
+
   async function duplicateItem(item: Item) {
-    const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...copy } = item;
+    const { id: _id, balances: _balances, createdAt: _createdAt, updatedAt: _updatedAt, ...copy } = item;
     setDraft({ ...copy, name: `${item.name} копия`, quantity: 0 });
     setEditingId(null);
     setItemHistory([]);
@@ -433,7 +484,7 @@ function App() {
       setUndo({
         message: `Удалено: ${item.name}`,
         run: async () => {
-          const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...restore } = item;
+          const { id: _id, balances: _balances, createdAt: _createdAt, updatedAt: _updatedAt, ...restore } = item;
           await request<Item>('/api/items', { method: 'POST', body: JSON.stringify(restore) });
           await loadData();
         }
@@ -1148,20 +1199,30 @@ function App() {
                 </label>
               </div>
               {activeEditItem && (
-                <div className="quick-quantity-actions wide">
-                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, -1)} disabled={draft.quantity <= 0}>
-                    -1
-                  </button>
-                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, 1)}>
-                    +1
-                  </button>
-                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, packageAmount(activeEditItem))}>
-                    + упаковка
-                  </button>
-                  <button type="button" onClick={() => adjustOpenItem(activeEditItem, -draft.quantity)} disabled={draft.quantity <= 0}>
-                    до 0
-                  </button>
-                </div>
+                <>
+                  <div className="quick-quantity-actions wide">
+                    <button type="button" onClick={() => adjustOpenItem(activeEditItem, -1)} disabled={draft.quantity <= 0}>
+                      -1
+                    </button>
+                    <button type="button" onClick={() => adjustOpenItem(activeEditItem, 1)}>
+                      +1
+                    </button>
+                    <button type="button" onClick={() => adjustOpenItem(activeEditItem, packageAmount(activeEditItem))}>
+                      + упаковка
+                    </button>
+                    <button type="button" onClick={() => adjustOpenItem(activeEditItem, -draft.quantity)} disabled={draft.quantity <= 0}>
+                      до 0
+                    </button>
+                  </div>
+                  <StockBalanceEditor
+                    item={activeEditItem}
+                    containers={containers}
+                    onCreate={(input) => createStockBalance(activeEditItem.id, input)}
+                    onUpdate={(balanceId, input) => updateStockBalance(activeEditItem.id, balanceId, input)}
+                    onTransfer={(fromBalanceId, toBalanceId, amount) => transferStock(activeEditItem.id, fromBalanceId, toBalanceId, amount)}
+                    onDelete={(balanceId) => deleteStockBalance(activeEditItem.id, balanceId)}
+                  />
+                </>
               )}
               <label>
                 Минимальный остаток

@@ -516,6 +516,73 @@ textarea:focus {
   opacity: 0.55;
 }
 
+.stock-balance-editor {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+}
+
+.stock-balance-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.stock-balance-heading h3 {
+  margin: 0;
+}
+
+.stock-balance-list {
+  display: grid;
+  gap: 8px;
+}
+
+.stock-balance-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(145px, 1fr) minmax(130px, 1fr) 96px auto 42px 42px;
+}
+
+.stock-balance-row > span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.stock-balance-row button,
+.stock-transfer-row button {
+  align-items: center;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  display: inline-flex;
+  justify-content: center;
+  min-height: 42px;
+}
+
+.stock-balance-row button:disabled,
+.stock-transfer-row button:disabled {
+  opacity: 0.5;
+}
+
+.stock-balance-create {
+  border-top: 1px dashed var(--border);
+  grid-template-columns: minmax(145px, 1fr) minmax(130px, 1fr) 96px auto 42px;
+  padding-top: 10px;
+}
+
+.stock-transfer-row {
+  align-items: center;
+  background: var(--surface-soft);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(145px, 1fr) auto minmax(145px, 1fr) 96px 120px;
+  padding: 10px;
+}
+
 .adjust-field {
   align-items: center;
   display: grid;
@@ -977,6 +1044,16 @@ dd {
 
   .quick-quantity-actions.wide {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stock-balance-row,
+  .stock-balance-create,
+  .stock-transfer-row {
+    grid-template-columns: 1fr;
+  }
+
+  .stock-balance-row > span {
+    display: none;
   }
 
   .toggle-button,

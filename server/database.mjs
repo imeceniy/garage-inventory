@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -156,6 +157,62 @@ const migrations = [
         DROP TABLE inventory_checks_with_item_fk;
         CREATE INDEX IF NOT EXISTS idx_inventory_checks_session ON inventory_checks(sessionId, checkedAt DESC);
       `);
+    }
+  },
+  {
+    version: 5,
+    name: 'stock balances by storage place',
+    run(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS stock_balances (
+          id TEXT PRIMARY KEY,
+          itemId TEXT NOT NULL,
+          containerId TEXT NOT NULL DEFAULT '',
+          location TEXT NOT NULL DEFAULT '',
+          quantity REAL NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL,
+          FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE,
+          UNIQUE (itemId, containerId, location)
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_movements (
+          id TEXT PRIMARY KEY,
+          itemId TEXT NOT NULL,
+          itemName TEXT NOT NULL,
+          fromBalanceId TEXT NOT NULL DEFAULT '',
+          toBalanceId TEXT NOT NULL DEFAULT '',
+          amount REAL NOT NULL CHECK (amount >= 0),
+          action TEXT NOT NULL,
+          createdAt TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_stock_balances_item ON stock_balances(itemId);
+        CREATE INDEX IF NOT EXISTS idx_stock_balances_container ON stock_balances(containerId);
+        CREATE INDEX IF NOT EXISTS idx_stock_movements_item_date ON stock_movements(itemId, createdAt DESC);
+      `);
+
+      const insertBalance = db.prepare(`
+        INSERT INTO stock_balances (id, itemId, containerId, location, quantity, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const items = db.prepare(`
+        SELECT id, containerId, location, quantity, createdAt, updatedAt
+        FROM items
+        WHERE NOT EXISTS (SELECT 1 FROM stock_balances WHERE stock_balances.itemId = items.id)
+      `).all();
+
+      for (const item of items) {
+        insertBalance.run(
+          crypto.randomUUID(),
+          item.id,
+          item.containerId || '',
+          item.location || '',
+          Math.max(0, Number(item.quantity) || 0),
+          item.createdAt,
+          item.updatedAt
+        );
+      }
     }
   }
 ];

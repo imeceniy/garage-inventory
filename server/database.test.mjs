@@ -32,7 +32,7 @@ afterEach(() => {
 describe('database foundation', () => {
   it('applies versioned migrations and enables foreign keys', () => {
     const { db } = createTestDatabase();
-    expect(db.prepare('SELECT count(*) AS count FROM schema_migrations').get().count).toBe(4);
+    expect(db.prepare('SELECT count(*) AS count FROM schema_migrations').get().count).toBe(5);
     expect(db.prepare('PRAGMA foreign_keys').get().foreign_keys).toBe(1);
     db.close();
   });
@@ -98,6 +98,7 @@ describe('database foundation', () => {
 
     const { db } = openDatabase(rootDir, { backupOnStart: false });
     expect(db.prepare('PRAGMA foreign_key_list(history)').all()).toHaveLength(0);
+    expect(db.prepare('SELECT quantity FROM stock_balances WHERE itemId = ?').get('item-1').quantity).toBe(5);
     db.prepare('DELETE FROM items WHERE id = ?').run('item-1');
     expect(db.prepare('SELECT count(*) AS count FROM history').get().count).toBe(1);
     db.close();
