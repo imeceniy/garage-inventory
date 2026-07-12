@@ -3,13 +3,11 @@ import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
 import express from 'express';
+import { openDatabase, withTransaction } from './database.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
-const dataDir = path.join(rootDir, 'data');
-const dbPath = path.join(dataDir, 'garage.sqlite');
 
 // Load a local .env file before reading runtime settings.
 const envPath = path.join(rootDir, '.env');
@@ -27,92 +25,16 @@ const httpsPort = Number(process.env.HTTPS_PORT || 0);
 const httpsKeyPath = process.env.HTTPS_KEY ? path.resolve(rootDir, process.env.HTTPS_KEY) : '';
 const httpsCertPath = process.env.HTTPS_CERT ? path.resolve(rootDir, process.env.HTTPS_CERT) : '';
 const password = process.env.GARAGE_PASSWORD;
+const backupOnStart = process.env.BACKUP_ON_START !== 'false';
+const configuredBackupRetention = Number(process.env.BACKUP_RETENTION || 14);
+const backupRetention = Number.isInteger(configuredBackupRetention) && configuredBackupRetention > 0 ? configuredBackupRetention : 14;
 
 if (!password) {
   console.error('GARAGE_PASSWORD is required');
   process.exit(1);
 }
 
-fs.mkdirSync(dataDir, { recursive: true });
-
-// Keep the schema intentionally small so the app stays easy to back up and move.
-const db = new DatabaseSync(dbPath);
-db.exec(`
-  CREATE TABLE IF NOT EXISTS items (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    category TEXT NOT NULL,
-    quantity REAL NOT NULL DEFAULT 0,
-    unit TEXT NOT NULL DEFAULT 'шт',
-    location TEXT NOT NULL DEFAULT '',
-    locations TEXT NOT NULL DEFAULT '[]',
-    barcode TEXT NOT NULL DEFAULT '',
-    project TEXT NOT NULL DEFAULT '',
-    tags TEXT NOT NULL DEFAULT '[]',
-    containerId TEXT NOT NULL DEFAULT '',
-    photo TEXT NOT NULL DEFAULT '',
-    minQuantity REAL NOT NULL DEFAULT 0,
-    note TEXT NOT NULL DEFAULT '',
-    createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS history (
-    id TEXT PRIMARY KEY,
-    itemId TEXT NOT NULL,
-    itemName TEXT NOT NULL,
-    amount REAL NOT NULL,
-    quantityAfter REAL NOT NULL,
-    action TEXT NOT NULL,
-    createdAt TEXT NOT NULL,
-    FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS containers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    code TEXT NOT NULL UNIQUE,
-    location TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    createdAt TEXT NOT NULL,
-    updatedAt TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS inventory_sessions (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    startedAt TEXT NOT NULL,
-    completedAt TEXT NOT NULL DEFAULT ''
-  );
-
-  CREATE TABLE IF NOT EXISTS inventory_checks (
-    id TEXT PRIMARY KEY,
-    sessionId TEXT NOT NULL,
-    itemId TEXT NOT NULL,
-    itemName TEXT NOT NULL,
-    expectedQuantity REAL NOT NULL,
-    actualQuantity REAL NOT NULL,
-    note TEXT NOT NULL DEFAULT '',
-    checkedAt TEXT NOT NULL,
-    FOREIGN KEY (sessionId) REFERENCES inventory_sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE
-  );
-`);
-
-const existingColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name);
-const migrations = [
-  ['locations', "ALTER TABLE items ADD COLUMN locations TEXT NOT NULL DEFAULT '[]'"],
-  ['barcode', "ALTER TABLE items ADD COLUMN barcode TEXT NOT NULL DEFAULT ''"],
-  ['project', "ALTER TABLE items ADD COLUMN project TEXT NOT NULL DEFAULT ''"],
-  ['tags', "ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"],
-  ['containerId', "ALTER TABLE items ADD COLUMN containerId TEXT NOT NULL DEFAULT ''"],
-  ['photo', "ALTER TABLE items ADD COLUMN photo TEXT NOT NULL DEFAULT ''"]
-];
-
-for (const [column, statement] of migrations) {
-  if (!existingColumns.includes(column)) db.exec(statement);
-}
+const { db } = openDatabase(rootDir, { backupOnStart, backupRetention });
 
 const app = express();
 const sessions = new Map();
@@ -384,22 +306,24 @@ app.post('/api/meta/rename', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM items').all();
   const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, tags = ?, updatedAt = ? WHERE id = ?');
 
-  for (const row of rows) {
-    const item = toItem(row);
-    if (type === 'project' && item.project === from) {
-      update.run(item.location, JSON.stringify(item.locations), to, JSON.stringify(item.tags), timestamp, item.id);
-    }
+  withTransaction(db, () => {
+    for (const row of rows) {
+      const item = toItem(row);
+      if (type === 'project' && item.project === from) {
+        update.run(item.location, JSON.stringify(item.locations), to, JSON.stringify(item.tags), timestamp, item.id);
+      }
 
-    if (type === 'location' && item.locations.includes(from)) {
-      const locations = replaceLocation(item.locations, from, to);
-      update.run(locations[0] || '', JSON.stringify(locations), item.project, JSON.stringify(item.tags), timestamp, item.id);
-    }
+      if (type === 'location' && item.locations.includes(from)) {
+        const locations = replaceLocation(item.locations, from, to);
+        update.run(locations[0] || '', JSON.stringify(locations), item.project, JSON.stringify(item.tags), timestamp, item.id);
+      }
 
-    if (type === 'tag' && item.tags.includes(from)) {
-      const tags = item.tags.map((entry) => (entry === from ? to : entry));
-      update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
+      if (type === 'tag' && item.tags.includes(from)) {
+        const tags = item.tags.map((entry) => (entry === from ? to : entry));
+        update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
+      }
     }
-  }
+  });
 
   res.json({ ok: true });
 });
@@ -417,22 +341,24 @@ app.post('/api/meta/delete', requireAuth, (req, res) => {
   const rows = db.prepare('SELECT * FROM items').all();
   const update = db.prepare('UPDATE items SET location = ?, locations = ?, project = ?, tags = ?, updatedAt = ? WHERE id = ?');
 
-  for (const row of rows) {
-    const item = toItem(row);
-    if (type === 'project' && item.project === value) {
-      update.run(item.location, JSON.stringify(item.locations), '', JSON.stringify(item.tags), timestamp, item.id);
-    }
+  withTransaction(db, () => {
+    for (const row of rows) {
+      const item = toItem(row);
+      if (type === 'project' && item.project === value) {
+        update.run(item.location, JSON.stringify(item.locations), '', JSON.stringify(item.tags), timestamp, item.id);
+      }
 
-    if (type === 'location' && item.locations.includes(value)) {
-      const locations = item.locations.filter((entry) => entry !== value);
-      update.run(locations[0] || '', JSON.stringify(locations), item.project, JSON.stringify(item.tags), timestamp, item.id);
-    }
+      if (type === 'location' && item.locations.includes(value)) {
+        const locations = item.locations.filter((entry) => entry !== value);
+        update.run(locations[0] || '', JSON.stringify(locations), item.project, JSON.stringify(item.tags), timestamp, item.id);
+      }
 
-    if (type === 'tag' && item.tags.includes(value)) {
-      const tags = item.tags.filter((entry) => entry !== value);
-      update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
+      if (type === 'tag' && item.tags.includes(value)) {
+        const tags = item.tags.filter((entry) => entry !== value);
+        update.run(item.location, JSON.stringify(item.locations), item.project, JSON.stringify(tags), timestamp, item.id);
+      }
     }
-  }
+  });
 
   res.json({ ok: true });
 });
@@ -493,8 +419,10 @@ app.patch('/api/containers/:id', requireAuth, (req, res) => {
 });
 
 app.delete('/api/containers/:id', requireAuth, (req, res) => {
-  db.prepare('UPDATE items SET containerId = ?, updatedAt = ? WHERE containerId = ?').run('', nowIso(), req.params.id);
-  db.prepare('DELETE FROM containers WHERE id = ?').run(req.params.id);
+  withTransaction(db, () => {
+    db.prepare('UPDATE items SET containerId = ?, updatedAt = ? WHERE containerId = ?').run('', nowIso(), req.params.id);
+    db.prepare('DELETE FROM containers WHERE id = ?').run(req.params.id);
+  });
   res.status(204).end();
 });
 
@@ -549,24 +477,26 @@ app.post('/api/inventory/sessions/:id/checks', requireAuth, (req, res) => {
   const current = toItem(item);
   const actualQuantity = Math.max(0, normalizeNumber(req.body?.actualQuantity, current.quantity));
   const timestamp = nowIso();
-  db.prepare(`
-    INSERT INTO inventory_checks (id, sessionId, itemId, itemName, expectedQuantity, actualQuantity, note, checkedAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    crypto.randomUUID(),
-    req.params.id,
-    current.id,
-    current.name,
-    current.quantity,
-    actualQuantity,
-    normalizeText(req.body?.note),
-    timestamp
-  );
+  withTransaction(db, () => {
+    db.prepare(`
+      INSERT INTO inventory_checks (id, sessionId, itemId, itemName, expectedQuantity, actualQuantity, note, checkedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      req.params.id,
+      current.id,
+      current.name,
+      current.quantity,
+      actualQuantity,
+      normalizeText(req.body?.note),
+      timestamp
+    );
 
-  if (actualQuantity !== current.quantity) {
-    db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(actualQuantity, timestamp, current.id);
-    recordHistory({ ...current, quantity: actualQuantity }, actualQuantity - current.quantity, 'inventory');
-  }
+    if (actualQuantity !== current.quantity) {
+      db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(actualQuantity, timestamp, current.id);
+      recordHistory({ ...current, quantity: actualQuantity }, actualQuantity - current.quantity, 'inventory');
+    }
+  });
 
   const rows = db.prepare('SELECT * FROM inventory_checks WHERE sessionId = ? ORDER BY checkedAt DESC').all(req.params.id);
   res.status(201).json(rows.map(toInventoryCheck));
@@ -577,35 +507,37 @@ app.post('/api/items', requireAuth, (req, res) => {
     const item = validateItem(req.body);
     const id = crypto.randomUUID();
     const timestamp = nowIso();
+    const saved = withTransaction(db, () => {
+      db.prepare(`
+        INSERT INTO items (
+          id, name, category, quantity, unit, location, locations, barcode, project, tags,
+          containerId, photo, minQuantity, note, createdAt, updatedAt
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        item.name,
+        item.category,
+        item.quantity,
+        item.unit,
+        item.locations[0] || item.location,
+        JSON.stringify(item.locations),
+        item.barcode,
+        item.project,
+        JSON.stringify(item.tags),
+        item.containerId,
+        item.photo,
+        item.minQuantity,
+        item.note,
+        timestamp,
+        timestamp
+      );
 
-    db.prepare(`
-      INSERT INTO items (
-        id, name, category, quantity, unit, location, locations, barcode, project, tags,
-        containerId, photo, minQuantity, note, createdAt, updatedAt
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      item.name,
-      item.category,
-      item.quantity,
-      item.unit,
-      item.locations[0] || item.location,
-      JSON.stringify(item.locations),
-      item.barcode,
-      item.project,
-      JSON.stringify(item.tags),
-      item.containerId,
-      item.photo,
-      item.minQuantity,
-      item.note,
-      timestamp,
-      timestamp
-    );
-
-    const row = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
-    const saved = toItem(row);
-    if (saved.quantity > 0) recordHistory(saved, saved.quantity, 'create');
+      const row = db.prepare('SELECT * FROM items WHERE id = ?').get(id);
+      const created = toItem(row);
+      if (created.quantity > 0) recordHistory(created, created.quantity, 'create');
+      return created;
+    });
     res.status(201).json(saved);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -622,33 +554,36 @@ app.patch('/api/items/:id', requireAuth, (req, res) => {
   try {
     const previous = toItem(existing);
     const update = { ...previous, ...validateItem(req.body, true), updatedAt: nowIso() };
-    db.prepare(`
-      UPDATE items
-      SET name = ?, category = ?, quantity = ?, unit = ?, location = ?, locations = ?, barcode = ?, project = ?,
-        tags = ?, containerId = ?, photo = ?, minQuantity = ?, note = ?, updatedAt = ?
-      WHERE id = ?
-    `).run(
-      update.name,
-      update.category,
-      update.quantity,
-      update.unit,
-      update.locations[0] || update.location,
-      JSON.stringify(update.locations),
-      update.barcode,
-      update.project,
-      JSON.stringify(update.tags),
-      update.containerId,
-      update.photo,
-      update.minQuantity,
-      update.note,
-      update.updatedAt,
-      req.params.id
-    );
+    const saved = withTransaction(db, () => {
+      db.prepare(`
+        UPDATE items
+        SET name = ?, category = ?, quantity = ?, unit = ?, location = ?, locations = ?, barcode = ?, project = ?,
+          tags = ?, containerId = ?, photo = ?, minQuantity = ?, note = ?, updatedAt = ?
+        WHERE id = ?
+      `).run(
+        update.name,
+        update.category,
+        update.quantity,
+        update.unit,
+        update.locations[0] || update.location,
+        JSON.stringify(update.locations),
+        update.barcode,
+        update.project,
+        JSON.stringify(update.tags),
+        update.containerId,
+        update.photo,
+        update.minQuantity,
+        update.note,
+        update.updatedAt,
+        req.params.id
+      );
 
-    const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-    const saved = toItem(row);
-    const delta = saved.quantity - previous.quantity;
-    if (delta !== 0) recordHistory(saved, delta, 'edit');
+      const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
+      const updated = toItem(row);
+      const delta = updated.quantity - previous.quantity;
+      if (delta !== 0) recordHistory(updated, delta, 'edit');
+      return updated;
+    });
     res.json(saved);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -662,17 +597,23 @@ app.post('/api/items/:id/adjust', requireAuth, (req, res) => {
     return;
   }
 
-  const existing = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-  if (!existing) {
+  const saved = withTransaction(db, () => {
+    const existing = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
+    if (!existing) return null;
+
+    const quantity = Math.max(0, existing.quantity + amount);
+    db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(quantity, nowIso(), req.params.id);
+    const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
+    const updated = toItem(row);
+    const actualDelta = quantity - existing.quantity;
+    if (actualDelta !== 0) recordHistory(updated, actualDelta, actualDelta > 0 ? 'add' : 'subtract');
+    return updated;
+  });
+
+  if (!saved) {
     res.status(404).json({ error: 'Позиция не найдена' });
     return;
   }
-
-  const quantity = Math.max(0, existing.quantity + amount);
-  db.prepare('UPDATE items SET quantity = ?, updatedAt = ? WHERE id = ?').run(quantity, nowIso(), req.params.id);
-  const row = db.prepare('SELECT * FROM items WHERE id = ?').get(req.params.id);
-  const saved = toItem(row);
-  recordHistory(saved, quantity - existing.quantity, amount >= 0 ? 'add' : 'subtract');
   res.json(saved);
 });
 

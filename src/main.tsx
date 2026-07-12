@@ -1,16 +1,6 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
-declare module 'react-dom/client' {
-  import * as React from 'react';
-
-  export interface Root {
-    render(children: React.ReactNode): void;
-  }
-
-  export function createRoot(container: Element | DocumentFragment): Root;
-}
-
 import {
   AlertTriangle,
   ArrowUpDown,
@@ -39,6 +29,7 @@ import {
   Undo2,
   X
 } from 'lucide-react';
+import { matchesSearch, searchAliasesFor } from './lib/search';
 import './styles.css';
 
 type Item = {
@@ -96,11 +87,6 @@ type MultiValueFieldProps = {
   placeholder: string;
   onChange: (values: string[]) => void;
 };
-type SearchableItem = {
-  searchText: string;
-  aliases: string[];
-};
-
 const emptyDraft: Draft = {
   name: '',
   category: 'Винты и крепеж',
@@ -132,24 +118,6 @@ const defaultProjects = ['Для ремонта велосипеда', 'Элек
 const units = ['шт', 'упак', 'м', 'мл', 'г', 'компл'];
 const tokenKey = 'garage_inventory_token';
 const themeKey = 'garage_inventory_theme';
-const searchAliases: Record<string, string[]> = {
-  винт: ['болт', 'шуруп', 'саморез', 'крепеж', 'крепёж'],
-  болт: ['винт', 'крепеж', 'крепёж'],
-  шуруп: ['саморез', 'винт', 'крепеж', 'крепёж'],
-  саморез: ['шуруп', 'винт', 'крепеж', 'крепёж'],
-  гайка: ['крепеж', 'крепёж'],
-  шайба: ['крепеж', 'крепёж'],
-  батарейка: ['аккумулятор', 'элемент', 'питание'],
-  аккумулятор: ['батарейка', 'акб', 'питание'],
-  провод: ['кабель', 'электрика'],
-  кабель: ['провод', 'электрика'],
-  изолента: ['лента', 'изоляция', 'электрика'],
-  стяжка: ['хомут', 'хомуты'],
-  хомут: ['стяжка', 'стяжки'],
-  клей: ['герметик', 'химия'],
-  сопло: ['nozzle', '3d', 'принтер'],
-  филамент: ['пластик', 'pla', 'petg', 'abs', '3d', 'принтер']
-};
 
 function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}` };
@@ -166,57 +134,6 @@ function mergeDelimitedValues(current: string[], value: string) {
   const incoming = parseDelimitedList(value);
   if (!incoming.length) return current;
   return Array.from(new Set([...current, ...incoming]));
-}
-
-function normalizeSearch(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/[^a-zа-я0-9]+/gi, ' ')
-    .trim();
-}
-
-function searchTokens(value: string) {
-  return normalizeSearch(value).split(/\s+/).filter(Boolean);
-}
-
-function expandSearchToken(token: string) {
-  const normalized = normalizeSearch(token);
-  return [normalized, ...(searchAliases[normalized] || [])];
-}
-
-function isFuzzyMatch(needle: string, candidate: string) {
-  if (needle.length < 4 || candidate.length < 4) return false;
-  if (candidate.includes(needle) || needle.includes(candidate)) return true;
-  if (Math.abs(needle.length - candidate.length) > 2) return false;
-
-  const limit = needle.length <= 6 ? 1 : 2;
-  const previous = Array.from({ length: candidate.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= needle.length; i += 1) {
-    const current = [i];
-    let rowMin = current[0];
-    for (let j = 1; j <= candidate.length; j += 1) {
-      const cost = needle[i - 1] === candidate[j - 1] ? 0 : 1;
-      const value = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
-      current[j] = value;
-      rowMin = Math.min(rowMin, value);
-    }
-    if (rowMin > limit) return false;
-    previous.splice(0, previous.length, ...current);
-  }
-  return previous[candidate.length] <= limit;
-}
-
-function matchesSearch(queryText: string, target: SearchableItem) {
-  const tokens = searchTokens(queryText);
-  if (!tokens.length) return true;
-  const haystack = normalizeSearch(target.searchText);
-  const haystackTokens = searchTokens(`${target.searchText} ${target.aliases.join(' ')}`);
-
-  return tokens.every((token) => {
-    const variants = expandSearchToken(token);
-    return variants.some((variant) => haystack.includes(variant) || haystackTokens.some((candidate) => isFuzzyMatch(variant, candidate)));
-  });
 }
 
 function itemLocations(item: Pick<Item, 'location' | 'locations'>) {
@@ -619,7 +536,9 @@ function App() {
         const actualDelta = updated.quantity - item.quantity;
         setUndo({
           message: `${actualDelta > 0 ? 'Добавлено' : 'Списано'} ${formatNumber(Math.abs(actualDelta))} ${item.unit}: ${item.name}`,
-          run: () => adjustItem(updated, -actualDelta, false)
+          run: async () => {
+            await adjustItem(updated, -actualDelta, false);
+          }
         });
       }
       return updated;
@@ -791,7 +710,7 @@ function App() {
         item.note
       ]
         .join(' ');
-      const aliases = [item.category, item.project, ...item.tags].flatMap(searchTokens).flatMap((token) => searchAliases[token] || []);
+      const aliases = searchAliasesFor([item.category, item.project, ...item.tags].join(' '));
       const textMatch = matchesSearch(search, { searchText: haystack, aliases });
       const categoryMatch = category === 'Все' || item.category === category;
       const projectMatch = project === 'Все' || item.project === project;

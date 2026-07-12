@@ -110,6 +110,25 @@ data/garage.sqlite
 
 The `data/` directory is intentionally ignored by git.
 
+Before migrations, every application start creates a consistent database copy in
+`data/backups/`. The latest 14 copies are retained by default. Create a manual
+backup with:
+
+```bash
+npm run backup
+```
+
+To restore, stop the app, replace `data/garage.sqlite` with a selected backup,
+remove stale `garage.sqlite-wal` and `garage.sqlite-shm` files if present, then
+start the process again:
+
+```bash
+pm2 stop garage-inventory
+cp data/backups/garage-YYYYMMDD-HHMMSS-mmm.sqlite data/garage.sqlite
+rm -f data/garage.sqlite-wal data/garage.sqlite-shm
+pm2 start garage-inventory
+```
+
 ## Home Server Deployment
 
 One simple deployment option is to keep the app in a user-owned directory on the
@@ -155,6 +174,8 @@ pm2 restart garage-inventory
 | `HTTPS_KEY` | No | - | Path to the HTTPS private key, relative to the project root. |
 | `HTTPS_CERT` | No | - | Path to the HTTPS certificate, relative to the project root. |
 | `GARAGE_PASSWORD` | Yes | - | Password required to enter the app. |
+| `BACKUP_ON_START` | No | `true` | Create a consistent SQLite copy before startup migrations. |
+| `BACKUP_RETENTION` | No | `14` | Number of recent automatic backups to retain. |
 
 ## Notes
 

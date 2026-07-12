@@ -110,6 +110,25 @@ data/garage.sqlite
 
 Папка `data/` намеренно исключена из git.
 
+Перед миграциями при каждом запуске автоматически создается согласованная копия
+базы в `data/backups/`. По умолчанию сохраняются 14 последних копий. Ручной
+бэкап можно создать командой:
+
+```bash
+npm run backup
+```
+
+Для восстановления остановите приложение, замените `data/garage.sqlite`
+выбранной копией и удалите оставшиеся файлы `garage.sqlite-wal` и
+`garage.sqlite-shm`, если они существуют. После этого снова запустите процесс:
+
+```bash
+pm2 stop garage-inventory
+cp data/backups/garage-YYYYMMDD-HHMMSS-mmm.sqlite data/garage.sqlite
+rm -f data/garage.sqlite-wal data/garage.sqlite-shm
+pm2 start garage-inventory
+```
+
 ## Деплой на домашний сервер
 
 Простой вариант деплоя: держать приложение в пользовательской директории на
@@ -155,6 +174,8 @@ pm2 restart garage-inventory
 | `HTTPS_KEY` | Нет | - | Путь к приватному ключу HTTPS относительно корня проекта. |
 | `HTTPS_CERT` | Нет | - | Путь к сертификату HTTPS относительно корня проекта. |
 | `GARAGE_PASSWORD` | Да | - | Пароль для входа в приложение. |
+| `BACKUP_ON_START` | Нет | `true` | Создавать согласованную копию SQLite перед миграциями при запуске. |
+| `BACKUP_RETENTION` | Нет | `14` | Количество последних автоматических копий. |
 
 ## Заметки
 
