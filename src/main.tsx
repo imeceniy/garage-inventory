@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import {
@@ -6,7 +6,6 @@ import {
   ArrowUpDown,
   Barcode,
   Boxes,
-  Camera,
   Check,
   ClipboardCheck,
   Filter,
@@ -14,12 +13,9 @@ import {
   History,
   LogOut,
   MapPin,
-  Minus,
   Moon,
   PackagePlus,
-  Plus,
   Printer,
-  QrCode,
   Rows3,
   Search,
   Settings,
@@ -29,172 +25,31 @@ import {
   Undo2,
   X
 } from 'lucide-react';
+import { ContainerEditor } from './components/ContainerEditor';
+import { ItemCard } from './components/ItemCard';
+import { MetaEditor, MultiValueField } from './components/MetadataEditors';
+import { categories, defaultProjects, emptyDraft, themeKey, tokenKey, units } from './domain/constants';
+import type {
+  Container,
+  Draft,
+  HistoryEntry,
+  InventoryCheck,
+  InventorySession,
+  Item,
+  MetaState,
+  MetaType,
+  QrTarget,
+  SortMode,
+  UndoAction,
+  ViewMode
+} from './domain/types';
+import { formatDate, formatNumber } from './lib/format';
+import { compressImage } from './lib/image';
+import { actionLabel, itemLocations, sortItems } from './lib/inventory';
 import { matchesSearch, searchAliasesFor } from './lib/search';
 import './styles.css';
-
-type Item = {
-  id: string;
-  name: string;
-  category: string;
-  quantity: number;
-  unit: string;
-  location: string;
-  locations: string[];
-  barcode: string;
-  project: string;
-  tags: string[];
-  containerId: string;
-  photo: string;
-  minQuantity: number;
-  note: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type HistoryEntry = {
-  id: string;
-  itemId: string;
-  itemName: string;
-  amount: number;
-  quantityAfter: number;
-  action: 'create' | 'edit' | 'add' | 'subtract' | 'inventory';
-  createdAt: string;
-};
-
-type Draft = Omit<Item, 'id' | 'createdAt' | 'updatedAt'>;
-type ViewMode = 'cards' | 'list';
-type SortMode = 'name' | 'quantity' | 'low' | 'updated' | 'location';
-type MetaType = 'location' | 'project' | 'tag';
-type UndoAction = { message: string; run: () => Promise<void> };
-type MetaState = { locations: string[]; projects: string[]; tags: string[] };
-type Container = { id: string; name: string; code: string; location: string; note: string; createdAt: string; updatedAt: string };
-type InventorySession = { id: string; name: string; status: 'open' | 'closed'; startedAt: string; completedAt: string };
-type InventoryCheck = {
-  id: string;
-  sessionId: string;
-  itemId: string;
-  itemName: string;
-  expectedQuantity: number;
-  actualQuantity: number;
-  note: string;
-  checkedAt: string;
-};
-type QrTarget = { title: string; value: string } | null;
-type MultiValueFieldProps = {
-  label: string;
-  values: string[];
-  suggestions: string[];
-  placeholder: string;
-  onChange: (values: string[]) => void;
-};
-const emptyDraft: Draft = {
-  name: '',
-  category: 'Винты и крепеж',
-  quantity: 0,
-  unit: 'шт',
-  location: '',
-  locations: [],
-  barcode: '',
-  project: '',
-  tags: [],
-  containerId: '',
-  photo: '',
-  minQuantity: 0,
-  note: ''
-};
-
-const categories = [
-  'Винты и крепеж',
-  'Гайки и шайбы',
-  'Батарейки',
-  'Электрика',
-  'Клей и химия',
-  'Ленты и изоляция',
-  'Инструментальные мелочи',
-  'Прочее'
-];
-
-const defaultProjects = ['Для ремонта велосипеда', 'Электрика', '3D-принтер'];
-const units = ['шт', 'упак', 'м', 'мл', 'г', 'компл'];
-const tokenKey = 'garage_inventory_token';
-const themeKey = 'garage_inventory_theme';
-
 function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}` };
-}
-
-function parseDelimitedList(value: string) {
-  return value
-    .split(/[\n,;]+/)
-    .map((entry) => entry.trim().replace(/^#+/, '').trim())
-    .filter(Boolean);
-}
-
-function mergeDelimitedValues(current: string[], value: string) {
-  const incoming = parseDelimitedList(value);
-  if (!incoming.length) return current;
-  return Array.from(new Set([...current, ...incoming]));
-}
-
-function itemLocations(item: Pick<Item, 'location' | 'locations'>) {
-  return item.locations.length ? item.locations : item.location ? [item.location] : [];
-}
-
-async function compressImage(file: File) {
-  const image = new Image();
-  const url = URL.createObjectURL(file);
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      image.onload = () => resolve();
-      image.onerror = reject;
-      image.src = url;
-    });
-
-    const maxSide = 1200;
-    const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(image.width * ratio));
-    canvas.height = Math.max(1, Math.round(image.height * ratio));
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('Не удалось обработать фото');
-
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.82);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-function formatNumber(value: number) {
-  return value.toLocaleString('ru-RU');
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    year: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(value));
-}
-
-function actionLabel(entry: HistoryEntry) {
-  if (entry.action === 'create') return 'создано';
-  if (entry.action === 'edit') return 'изменено вручную';
-  if (entry.action === 'inventory') return 'инвентаризация';
-  return entry.amount > 0 ? 'добавлено' : 'списано';
-}
-
-function sortItems(items: Item[], sort: SortMode) {
-  return [...items].sort((a, b) => {
-    if (sort === 'quantity') return a.quantity - b.quantity || a.name.localeCompare(b.name, 'ru');
-    if (sort === 'low') return a.quantity - a.minQuantity - (b.quantity - b.minQuantity) || a.name.localeCompare(b.name, 'ru');
-    if (sort === 'updated') return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-    if (sort === 'location') return (itemLocations(a)[0] || '').localeCompare(itemLocations(b)[0] || '', 'ru');
-    return a.name.localeCompare(b.name, 'ru');
-  });
 }
 
 function App() {
@@ -935,169 +790,27 @@ function App() {
 
       <section className="workbench">
         <section className={viewMode === 'list' ? 'inventory-grid list-mode' : 'inventory-grid'}>
-          {filteredItems.map((item) => {
-            const low = item.quantity <= item.minQuantity;
-            const step = Math.max(0.01, adjustBy[item.id] || 1);
-            const pack = packageAmount(item);
-            const restock = Math.max(0, item.minQuantity - item.quantity);
-            const container = containers.find((entry) => entry.id === item.containerId);
-            return (
-              <article
-                className={low ? 'item-card low' : 'item-card'}
-                key={item.id}
-                onClick={() => startEdit(item)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    startEdit(item);
-                  }
-                }}
-              >
-                {item.photo ? (
-                  <img className="item-photo" src={item.photo} alt={item.name} />
-                ) : (
-                  <div className="item-photo placeholder">
-                    <Camera size={28} />
-                  </div>
-                )}
-                <div className="item-card-header">
-                  <span className="category-chip">{item.category}</span>
-                  {low && <AlertTriangle size={18} className="low-icon" />}
-                </div>
-                <h2>{item.name}</h2>
-                <div className="meta-row">
-                  {item.project && (
-                    <span>
-                      <FolderKanban size={14} />
-                      {item.project}
-                    </span>
-                  )}
-                  {item.barcode && (
-                    <span>
-                      <Barcode size={14} />
-                      {item.barcode}
-                    </span>
-                  )}
-                  {container && (
-                    <span>
-                      <Boxes size={14} />
-                      {container.name}
-                    </span>
-                  )}
-                  {item.tags.map((entry) => (
-                    <span key={entry}>#{entry}</span>
-                  ))}
-                </div>
-                <div className="quantity-row">
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      adjustItem(item, -step);
-                    }}
-                    title={`Списать ${formatNumber(step)}`}
-                  >
-                    <Minus size={18} />
-                  </button>
-                  <strong>
-                    {formatNumber(item.quantity)} {item.unit}
-                  </strong>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      adjustItem(item, step);
-                    }}
-                    title={`Добавить ${formatNumber(step)}`}
-                  >
-                    <Plus size={18} />
-                  </button>
-                </div>
-                <label className="adjust-field">
-                  Шаг
-                  <input
-                    min="0.01"
-                    step="0.01"
-                    type="number"
-                    value={adjustBy[item.id] ?? 1}
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => setAdjustBy((current) => ({ ...current, [item.id]: Number(event.target.value) || 1 }))}
-                  />
-                </label>
-                <div className="quick-quantity-actions">
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      adjustItem(item, pack);
-                    }}
-                    title={`Добавить упаковку: ${formatNumber(pack)} ${item.unit}`}
-                  >
-                    + упаковка
-                  </button>
-                  <button
-                    disabled={item.quantity <= 0}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      adjustItem(item, -item.quantity);
-                    }}
-                    title="Списать остаток до нуля"
-                  >
-                    до 0
-                  </button>
-                </div>
-                <dl>
-                  <div>
-                    <dt>Минимум</dt>
-                    <dd>
-                      {formatNumber(item.minQuantity)} {item.unit}
-                      {restock > 0 && <span className="restock">докупить {formatNumber(restock)} {item.unit}</span>}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Места</dt>
-                    <dd className="location-list">
-                      {(item.locations.length ? item.locations : item.location ? [item.location] : ['Не указано']).map((location) => (
-                        <span key={location}>
-                          <MapPin size={13} />
-                          {location}
-                        </span>
-                      ))}
-                    </dd>
-                  </div>
-                </dl>
-                {item.note && <p className="note">{item.note}</p>}
-                <div className="card-actions">
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      duplicateItem(item);
-                    }}
-                    title="Дублировать"
-                  >
-                    <PackagePlus size={17} />
-                  </button>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setQrTarget({ title: item.name, value: item.barcode || `item:${item.id}` });
-                    }}
-                    title="QR-код позиции"
-                  >
-                    <QrCode size={17} />
-                  </button>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      deleteItem(item);
-                    }}
-                    title="Удалить"
-                  >
-                    <Trash2 size={17} />
-                  </button>
-                </div>
-              </article>
-            );
-          })}
+          {filteredItems.map((item) => (
+            <ItemCard
+              key={item.id}
+              item={item}
+              container={containers.find((entry) => entry.id === item.containerId)}
+              adjustValue={adjustBy[item.id] ?? 1}
+              packageValue={packageAmount(item)}
+              onAdjustValueChange={(value) => setAdjustBy((current) => ({ ...current, [item.id]: value }))}
+              onAdjust={(amount) => {
+                void adjustItem(item, amount);
+              }}
+              onOpen={() => {
+                void startEdit(item);
+              }}
+              onDuplicate={() => duplicateItem(item)}
+              onQr={() => setQrTarget({ title: item.name, value: item.barcode || `item:${item.id}` })}
+              onDelete={() => {
+                void deleteItem(item);
+              }}
+            />
+          ))}
         </section>
 
         <aside className="side-panel">
@@ -1537,231 +1250,6 @@ function App() {
         </div>
       )}
     </main>
-  );
-}
-
-function MultiValueField({ label, values, suggestions, placeholder, onChange }: MultiValueFieldProps) {
-  const [entry, setEntry] = useState('');
-  const listId = useId();
-  const availableSuggestions = suggestions.filter((suggestion) => !values.includes(suggestion));
-
-  function addValue(value = entry) {
-    const next = mergeDelimitedValues(values, value);
-    onChange(next);
-    setEntry('');
-  }
-
-  function removeValue(value: string) {
-    onChange(values.filter((entryValue) => entryValue !== value));
-  }
-
-  return (
-    <label className="multi-value-field">
-      {label}
-      <span className="chip-input-row">
-        <input
-          list={listId}
-          value={entry}
-          onChange={(event) => setEntry(event.target.value)}
-          onBlur={() => addValue()}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ',' || event.key === ';') {
-              event.preventDefault();
-              addValue();
-            }
-          }}
-          onPaste={(event) => {
-            const pasted = event.clipboardData.getData('text');
-            if (parseDelimitedList(pasted).length > 1) {
-              event.preventDefault();
-              addValue(pasted);
-            }
-          }}
-          placeholder={placeholder}
-        />
-        <button type="button" onClick={() => addValue()} title="Добавить">
-          <Plus size={17} />
-        </button>
-      </span>
-      <datalist id={listId}>
-        {availableSuggestions.map((suggestion) => (
-          <option key={suggestion} value={suggestion} />
-        ))}
-      </datalist>
-      {values.length > 0 && (
-        <span className="editable-chip-list">
-          {values.map((value) => (
-            <button key={value} type="button" onClick={() => removeValue(value)} title="Удалить">
-              {value}
-              <X size={14} />
-            </button>
-          ))}
-        </span>
-      )}
-    </label>
-  );
-}
-
-function MetaEditor({
-  title,
-  type,
-  values,
-  onRename,
-  onDelete
-}: {
-  title: string;
-  type: MetaType;
-  values: string[];
-  onRename: (type: MetaType, from: string, to: string) => Promise<void>;
-  onDelete: (type: MetaType, value: string) => Promise<void>;
-}) {
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [busyValue, setBusyValue] = useState('');
-
-  async function save(from: string) {
-    const to = (drafts[from] ?? from).trim();
-    if (!to || to === from) return;
-    setBusyValue(from);
-    try {
-      await onRename(type, from, to);
-      setDrafts((current) => {
-        const next = { ...current };
-        delete next[from];
-        return next;
-      });
-    } finally {
-      setBusyValue('');
-    }
-  }
-
-  async function remove(value: string) {
-    const confirmed = window.confirm(`Удалить "${value}" из всех позиций?`);
-    if (!confirmed) return;
-    setBusyValue(value);
-    try {
-      await onDelete(type, value);
-    } finally {
-      setBusyValue('');
-    }
-  }
-
-  return (
-    <section className="meta-section">
-      <h3>{title}</h3>
-      {values.length ? (
-        <div className="meta-list">
-          {values.map((value) => (
-            <div className="meta-row-edit" key={value}>
-              <input
-                value={drafts[value] ?? value}
-                onChange={(event) => setDrafts((current) => ({ ...current, [value]: event.target.value }))}
-              />
-              <button disabled={busyValue === value || (drafts[value] ?? value) === value} onClick={() => save(value)}>
-                <Check size={16} />
-              </button>
-              <button disabled={busyValue === value} onClick={() => remove(value)}>
-                <Trash2 size={16} />
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="muted">Пока нет значений.</p>
-      )}
-    </section>
-  );
-}
-
-function ContainerEditor({
-  containers,
-  onSave,
-  onDelete,
-  onQr
-}: {
-  containers: Container[];
-  onSave: (container: Partial<Container>) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
-  onQr: (container: Container) => void;
-}) {
-  const [draft, setDraft] = useState<Partial<Container>>({ name: '', location: '', note: '' });
-  const [busy, setBusy] = useState(false);
-
-  async function save(container: Partial<Container>) {
-    setBusy(true);
-    try {
-      await onSave(container);
-      if (!container.id) setDraft({ name: '', location: '', note: '' });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section className="container-editor">
-      <div className="container-create">
-        <input
-          value={draft.name || ''}
-          onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-          placeholder="Ящик с крепежом"
-        />
-        <input
-          value={draft.location || ''}
-          onChange={(event) => setDraft((current) => ({ ...current, location: event.target.value }))}
-          placeholder="Гараж, стеллаж 1"
-        />
-        <button className="primary-button" disabled={busy || !draft.name} onClick={() => save(draft)}>
-          <Plus size={18} />
-          Добавить
-        </button>
-      </div>
-      <div className="container-list">
-        {containers.map((container) => (
-          <ContainerRow
-            key={container.id}
-            container={container}
-            busy={busy}
-            onSave={save}
-            onDelete={onDelete}
-            onQr={onQr}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ContainerRow({
-  container,
-  busy,
-  onSave,
-  onDelete,
-  onQr
-}: {
-  container: Container;
-  busy: boolean;
-  onSave: (container: Partial<Container>) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
-  onQr: (container: Container) => void;
-}) {
-  const [draft, setDraft] = useState(container);
-
-  return (
-    <div className="container-row">
-      <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-      <input value={draft.location} onChange={(event) => setDraft({ ...draft, location: event.target.value })} />
-      <input value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} placeholder="Заметка" />
-      <div>
-        <button disabled={busy} onClick={() => onSave(draft)} title="Сохранить">
-          <Check size={16} />
-        </button>
-        <button onClick={() => onQr(container)} title="QR-код">
-          <QrCode size={16} />
-        </button>
-        <button disabled={busy} onClick={() => onDelete(container.id)} title="Удалить">
-          <Trash2 size={16} />
-        </button>
-      </div>
-    </div>
   );
 }
 
