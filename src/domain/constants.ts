@@ -9,10 +9,13 @@ export const emptyDraft: Draft = {
   locations: [],
   barcode: '',
   project: '',
+  projects: [],
   tags: [],
   containerId: '',
   photo: '',
   minQuantity: 0,
+  reorderPoint: 0,
+  targetQuantity: 0,
   note: ''
 };
 
@@ -27,7 +30,5 @@ export const categories = [
   'Прочее'
 ];
 
-export const defaultProjects = ['Для ремонта велосипеда', 'Электрика', '3D-принтер'];
 export const units = ['шт', 'упак', 'м', 'мл', 'г', 'компл'];
-export const tokenKey = 'garage_inventory_token';
 export const themeKey = 'garage_inventory_theme';

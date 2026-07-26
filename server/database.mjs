@@ -214,6 +214,252 @@ const migrations = [
         );
       }
     }
+  },
+  {
+    version: 6,
+    name: 'normalized inventory domain',
+    run(db) {
+      const itemColumns = new Set(db.prepare('PRAGMA table_info(items)').all().map((column) => column.name));
+      if (!itemColumns.has('reorderPoint')) {
+        db.exec('ALTER TABLE items ADD COLUMN reorderPoint REAL NOT NULL DEFAULT 0');
+        db.exec('UPDATE items SET reorderPoint = minQuantity');
+      }
+      if (!itemColumns.has('targetQuantity')) {
+        db.exec('ALTER TABLE items ADD COLUMN targetQuantity REAL NOT NULL DEFAULT 0');
+        db.exec('UPDATE items SET targetQuantity = minQuantity');
+      }
+      if (!itemColumns.has('defaultBalanceId')) {
+        db.exec("ALTER TABLE items ADD COLUMN defaultBalanceId TEXT NOT NULL DEFAULT ''");
+      }
+      if (!itemColumns.has('deletedAt')) {
+        db.exec("ALTER TABLE items ADD COLUMN deletedAt TEXT NOT NULL DEFAULT ''");
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS locations (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          parentId TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          note TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS tags (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          createdAt TEXT NOT NULL,
+          updatedAt TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS item_projects (
+          itemId TEXT NOT NULL,
+          projectId TEXT NOT NULL,
+          PRIMARY KEY (itemId, projectId),
+          FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE,
+          FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS item_tags (
+          itemId TEXT NOT NULL,
+          tagId TEXT NOT NULL,
+          PRIMARY KEY (itemId, tagId),
+          FOREIGN KEY (itemId) REFERENCES items(id) ON DELETE CASCADE,
+          FOREIGN KEY (tagId) REFERENCES tags(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_operations (
+          id TEXT PRIMARY KEY,
+          itemId TEXT NOT NULL,
+          itemName TEXT NOT NULL,
+          type TEXT NOT NULL,
+          amount REAL NOT NULL,
+          quantityBefore REAL NOT NULL,
+          quantityAfter REAL NOT NULL,
+          fromBalanceId TEXT NOT NULL DEFAULT '',
+          toBalanceId TEXT NOT NULL DEFAULT '',
+          note TEXT NOT NULL DEFAULT '',
+          createdAt TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_items_active_name ON items(deletedAt, name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_operations_item_date ON stock_operations(itemId, createdAt DESC);
+        CREATE INDEX IF NOT EXISTS idx_operations_date ON stock_operations(createdAt DESC);
+        CREATE INDEX IF NOT EXISTS idx_item_projects_project ON item_projects(projectId);
+        CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tagId);
+      `);
+
+      const timestamp = new Date().toISOString();
+      const ensureLocation = db.prepare(`
+        INSERT INTO locations (id, name, parentId, createdAt, updatedAt)
+        VALUES (?, ?, '', ?, ?)
+        ON CONFLICT(name) DO NOTHING
+      `);
+      const ensureProject = db.prepare(`
+        INSERT INTO projects (id, name, note, createdAt, updatedAt)
+        VALUES (?, ?, '', ?, ?)
+        ON CONFLICT(name) DO NOTHING
+      `);
+      const ensureTag = db.prepare(`
+        INSERT INTO tags (id, name, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(name) DO NOTHING
+      `);
+      const linkProject = db.prepare(`
+        INSERT OR IGNORE INTO item_projects (itemId, projectId)
+        SELECT ?, id FROM projects WHERE name = ? COLLATE NOCASE
+      `);
+      const linkTag = db.prepare(`
+        INSERT OR IGNORE INTO item_tags (itemId, tagId)
+        SELECT ?, id FROM tags WHERE name = ? COLLATE NOCASE
+      `);
+      const setDefaultBalance = db.prepare(`
+        UPDATE items
+        SET defaultBalanceId = COALESCE(
+          (SELECT id FROM stock_balances WHERE itemId = items.id ORDER BY quantity DESC, createdAt LIMIT 1),
+          ''
+        )
+        WHERE id = ?
+      `);
+
+      for (const row of db.prepare('SELECT id, location, locations, project, tags FROM items').all()) {
+        const locations = new Set();
+        if (row.location) locations.add(row.location.trim());
+        try {
+          for (const value of JSON.parse(row.locations || '[]')) {
+            if (typeof value === 'string' && value.trim()) locations.add(value.trim());
+          }
+        } catch {
+          // Legacy malformed metadata is ignored; the original value stays in items.
+        }
+        for (const name of locations) {
+          ensureLocation.run(crypto.randomUUID(), name, timestamp, timestamp);
+        }
+
+        if (row.project?.trim()) {
+          const name = row.project.trim();
+          ensureProject.run(crypto.randomUUID(), name, timestamp, timestamp);
+          linkProject.run(row.id, name);
+        }
+
+        try {
+          for (const value of JSON.parse(row.tags || '[]')) {
+            if (typeof value !== 'string' || !value.trim()) continue;
+            const name = value.trim().replace(/^#+/, '');
+            ensureTag.run(crypto.randomUUID(), name, timestamp, timestamp);
+            linkTag.run(row.id, name);
+          }
+        } catch {
+          // Legacy malformed metadata is ignored; the original value stays in items.
+        }
+
+        setDefaultBalance.run(row.id);
+      }
+
+      const insertOperation = db.prepare(`
+        INSERT OR IGNORE INTO stock_operations (
+          id, itemId, itemName, type, amount, quantityBefore, quantityAfter,
+          fromBalanceId, toBalanceId, note, createdAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?)
+      `);
+      for (const entry of db.prepare('SELECT * FROM history ORDER BY createdAt').all()) {
+        insertOperation.run(
+          entry.id,
+          entry.itemId,
+          entry.itemName,
+          entry.action,
+          entry.amount,
+          entry.quantityAfter - entry.amount,
+          entry.quantityAfter,
+          entry.createdAt
+        );
+      }
+
+      const insertTransfer = db.prepare(`
+        INSERT OR IGNORE INTO stock_operations (
+          id, itemId, itemName, type, amount, quantityBefore, quantityAfter,
+          fromBalanceId, toBalanceId, note, createdAt
+        ) VALUES (?, ?, ?, 'transfer', 0, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const movement of db.prepare("SELECT * FROM stock_movements WHERE action = 'transfer'").all()) {
+        const quantity = db.prepare('SELECT quantity FROM items WHERE id = ?').get(movement.itemId)?.quantity || 0;
+        insertTransfer.run(
+          movement.id,
+          movement.itemId,
+          movement.itemName,
+          quantity,
+          quantity,
+          movement.fromBalanceId,
+          movement.toBalanceId,
+          `Перемещено ${movement.amount}`,
+          movement.createdAt
+        );
+      }
+    }
+  },
+  {
+    version: 7,
+    name: 'unique non-empty barcodes',
+    run(db) {
+      const duplicates = db.prepare(`
+        SELECT barcode
+        FROM items
+        WHERE barcode <> '' AND deletedAt = ''
+        GROUP BY barcode
+        HAVING COUNT(*) > 1
+      `).all();
+
+      const preserveConflict = db.prepare(`
+        UPDATE items
+        SET note = trim(note || CASE WHEN note = '' THEN '' ELSE char(10) END || ?),
+            barcode = '',
+            updatedAt = ?
+        WHERE id = ?
+      `);
+      for (const duplicate of duplicates) {
+        const rows = db.prepare(`
+          SELECT id FROM items
+          WHERE barcode = ? AND deletedAt = ''
+          ORDER BY createdAt, id
+        `).all(duplicate.barcode);
+        for (const row of rows.slice(1)) {
+          preserveConflict.run(`Прежний дублирующийся штрихкод: ${duplicate.barcode}`, new Date().toISOString(), row.id);
+        }
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_items_unique_active_barcode
+        ON items(barcode)
+        WHERE barcode <> '' AND deletedAt = '';
+      `);
+    }
+  },
+  {
+    version: 8,
+    name: 'staged inventory checks',
+    run(db) {
+      const columns = new Set(db.prepare('PRAGMA table_info(inventory_checks)').all().map((column) => column.name));
+      if (!columns.has('balanceId')) {
+        db.exec("ALTER TABLE inventory_checks ADD COLUMN balanceId TEXT NOT NULL DEFAULT ''");
+      }
+      if (!columns.has('supersededAt')) {
+        db.exec("ALTER TABLE inventory_checks ADD COLUMN supersededAt TEXT NOT NULL DEFAULT ''");
+      }
+      if (!columns.has('appliedAt')) {
+        db.exec("ALTER TABLE inventory_checks ADD COLUMN appliedAt TEXT NOT NULL DEFAULT ''");
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_inventory_checks_active
+        ON inventory_checks(sessionId, supersededAt, checkedAt DESC);
+      `);
+    }
   }
 ];
 

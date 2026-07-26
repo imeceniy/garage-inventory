@@ -7,7 +7,9 @@
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
     "client:dev": "vite --host 0.0.0.0",
     "server:dev": "node --watch server/index.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run typecheck:client && npm run typecheck:server",
+    "typecheck:client": "tsc --noEmit",
+    "typecheck:server": "tsc -p server/tsconfig.json",
     "test": "vitest run --config vitest.config.ts",
     "check": "npm run typecheck && npm run test && npm run build",
     "backup": "node server/backup.mjs",
@@ -21,7 +23,8 @@
     "qrcode": "^1.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "vite": "^7.2.4"
+    "vite": "^7.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
@@ -29,6 +32,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "concurrently": "^9.2.1",
+    "supertest": "^7.2.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   },

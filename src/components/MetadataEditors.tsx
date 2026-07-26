@@ -72,13 +72,15 @@ type MetaEditorProps = {
   title: string;
   type: MetaType;
   values: string[];
+  onCreate?: (type: MetaType, name: string) => Promise<void>;
   onRename: (type: MetaType, from: string, to: string) => Promise<void>;
   onDelete: (type: MetaType, value: string) => Promise<void>;
 };
 
-export function MetaEditor({ title, type, values, onRename, onDelete }: MetaEditorProps) {
+export function MetaEditor({ title, type, values, onCreate, onRename, onDelete }: MetaEditorProps) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyValue, setBusyValue] = useState('');
+  const [newValue, setNewValue] = useState('');
 
   async function save(from: string) {
     const to = (drafts[from] ?? from).trim();
@@ -109,6 +111,28 @@ export function MetaEditor({ title, type, values, onRename, onDelete }: MetaEdit
   return (
     <section className="meta-section">
       <h3>{title}</h3>
+      {onCreate && (
+        <form
+          className="meta-create-row"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const name = newValue.trim();
+            if (!name) return;
+            setBusyValue('__new__');
+            try {
+              await onCreate(type, name);
+              setNewValue('');
+            } finally {
+              setBusyValue('');
+            }
+          }}
+        >
+          <input value={newValue} onChange={(event) => setNewValue(event.target.value)} placeholder="Новое значение" />
+          <button disabled={!newValue.trim() || busyValue === '__new__'} title="Добавить">
+            <Plus size={16} />
+          </button>
+        </form>
+      )}
       {values.length ? (
         <div className="meta-list">
           {values.map((value) => (

@@ -21,6 +21,9 @@ export function actionLabel(entry: HistoryEntry) {
   if (entry.action === 'create') return 'создано';
   if (entry.action === 'edit') return 'изменено вручную';
   if (entry.action === 'inventory') return 'инвентаризация';
+  if (entry.action === 'transfer') return 'перемещение';
+  if (entry.action === 'receive') return 'поступление';
+  if (entry.action === 'adjust') return 'корректировка';
   return entry.amount > 0 ? 'добавлено' : 'списано';
 }
 

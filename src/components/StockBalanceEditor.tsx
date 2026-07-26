@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ArrowRight, Check, Plus, Trash2 } from 'lucide-react';
+import { ArrowRight, Check, Plus, Star, Trash2 } from 'lucide-react';
 import type { Container, Item, StockBalance } from '../domain/types';
 import { formatNumber } from '../lib/format';
 
@@ -12,6 +12,7 @@ type StockBalanceEditorProps = {
   onUpdate: (balanceId: string, input: BalanceInput) => Promise<void>;
   onTransfer: (fromBalanceId: string, toBalanceId: string, amount: number) => Promise<void>;
   onDelete: (balanceId: string) => Promise<void>;
+  onSetDefault: (balanceId: string) => Promise<void>;
 };
 
 function balanceLabel(balance: StockBalance, containers: Container[]) {
@@ -19,7 +20,7 @@ function balanceLabel(balance: StockBalance, containers: Container[]) {
   return container?.name || balance.location || 'Без места';
 }
 
-export function StockBalanceEditor({ item, containers, onCreate, onUpdate, onTransfer, onDelete }: StockBalanceEditorProps) {
+export function StockBalanceEditor({ item, containers, onCreate, onUpdate, onTransfer, onDelete, onSetDefault }: StockBalanceEditorProps) {
   const [drafts, setDrafts] = useState<Record<string, BalanceInput>>({});
   const [newBalance, setNewBalance] = useState<BalanceInput>({ containerId: '', location: '', quantity: 0 });
   const [transfer, setTransfer] = useState({ fromBalanceId: '', toBalanceId: '', amount: 1 });
@@ -66,6 +67,15 @@ export function StockBalanceEditor({ item, containers, onCreate, onUpdate, onTra
               <span>{item.unit}</span>
               <button type="button" disabled={busy} onClick={() => run(() => onUpdate(balance.id, draft))} title="Сохранить">
                 <Check size={16} />
+              </button>
+              <button
+                type="button"
+                className={balance.id === item.defaultBalanceId ? 'default-balance active' : 'default-balance'}
+                disabled={busy || balance.id === item.defaultBalanceId}
+                onClick={() => run(() => onSetDefault(balance.id))}
+                title={balance.id === item.defaultBalanceId ? 'Основное место' : 'Сделать основным'}
+              >
+                <Star size={16} />
               </button>
               <button type="button" disabled={busy || balance.quantity > 0} onClick={() => run(() => onDelete(balance.id))} title="Удалить пустое место">
                 <Trash2 size={16} />

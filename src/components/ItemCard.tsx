@@ -1,11 +1,12 @@
+import { useState } from 'react';
 import {
   AlertTriangle,
-  Barcode,
   Boxes,
   Camera,
-  FolderKanban,
+  Copy,
   MapPin,
   Minus,
+  MoreVertical,
   PackagePlus,
   Plus,
   QrCode,
@@ -13,14 +14,12 @@ import {
 } from 'lucide-react';
 import type { Container, Item } from '../domain/types';
 import { formatNumber } from '../lib/format';
-import { itemLocations } from '../lib/inventory';
+import { thumbnailUrl } from '../lib/image';
 
 type ItemCardProps = {
   item: Item;
   container?: Container;
-  adjustValue: number;
   packageValue: number;
-  onAdjustValueChange: (value: number) => void;
   onAdjust: (amount: number) => void;
   onOpen: () => void;
   onDuplicate: () => void;
@@ -31,126 +30,97 @@ type ItemCardProps = {
 export function ItemCard({
   item,
   container,
-  adjustValue,
   packageValue,
-  onAdjustValueChange,
   onAdjust,
   onOpen,
   onDuplicate,
   onQr,
   onDelete
 }: ItemCardProps) {
-  const low = item.quantity <= item.minQuantity;
-  const step = Math.max(0.01, adjustValue || 1);
-  const restock = Math.max(0, item.minQuantity - item.quantity);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const low = item.quantity <= item.reorderPoint && item.quantity < item.targetQuantity;
+  const primaryBalance = item.balances.find((balance) => balance.id === item.defaultBalanceId) || item.balances[0];
+  const place = container?.name || primaryBalance?.location || 'Место не указано';
 
   return (
-    <article
-      className={low ? 'item-card low' : 'item-card'}
-      onClick={onOpen}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          onOpen();
-        }
-      }}
-    >
-      {item.photo ? (
-        <img className="item-photo" src={item.photo} alt={item.name} />
-      ) : (
-        <div className="item-photo placeholder">
-          <Camera size={28} />
-        </div>
-      )}
-      <div className="item-card-header">
-        <span className="category-chip">{item.category}</span>
-        {low && <AlertTriangle size={18} className="low-icon" />}
-      </div>
-      <h2>{item.name}</h2>
-      <div className="meta-row">
-        {item.project && (
-          <span>
-            <FolderKanban size={14} />
-            {item.project}
+    <article className={low ? 'item-card low' : 'item-card'}>
+      <button className="item-card-open" type="button" onClick={onOpen} aria-label={`Открыть ${item.name}`}>
+        {item.photo ? (
+          <img
+            className="item-photo"
+            src={thumbnailUrl(item.photo)}
+            alt=""
+            onError={(event) => {
+              if (event.currentTarget.src !== item.photo) event.currentTarget.src = item.photo;
+            }}
+          />
+        ) : (
+          <span className="item-photo placeholder" aria-hidden="true">
+            <Camera size={26} />
           </span>
         )}
-        {item.barcode && (
-          <span>
-            <Barcode size={14} />
-            {item.barcode}
+        <span className="item-card-copy">
+          <span className="item-card-title-row">
+            <strong>{item.name}</strong>
+            {low && <AlertTriangle size={17} className="low-icon" aria-label="Нужно пополнить" />}
           </span>
-        )}
-        {container && (
-          <span>
-            <Boxes size={14} />
-            {container.name}
+          <span className="item-location">
+            {container ? <Boxes size={15} /> : <MapPin size={15} />}
+            {place}
           </span>
-        )}
-        {item.tags.map((entry) => (
-          <span key={entry}>#{entry}</span>
-        ))}
-      </div>
-      <div className="quantity-row">
-        <button onClick={(event) => { event.stopPropagation(); onAdjust(-step); }} title={`Списать ${formatNumber(step)}`}>
-          <Minus size={18} />
+          <span className="item-context">
+            {item.category}
+            {item.projects[0] ? ` · ${item.projects[0]}` : ''}
+          </span>
+        </span>
+      </button>
+
+      <div className="item-stock-row">
+        <button type="button" onClick={() => onAdjust(-1)} disabled={item.quantity <= 0} title="Списать одну">
+          <Minus size={19} />
         </button>
-        <strong>{formatNumber(item.quantity)} {item.unit}</strong>
-        <button onClick={(event) => { event.stopPropagation(); onAdjust(step); }} title={`Добавить ${formatNumber(step)}`}>
-          <Plus size={18} />
+        <button className="item-stock-value" type="button" onClick={onOpen}>
+          <strong>{formatNumber(item.quantity)}</strong>
+          <span>{item.unit}</span>
         </button>
-      </div>
-      <label className="adjust-field">
-        Шаг
-        <input
-          min="0.01"
-          step="0.01"
-          type="number"
-          value={adjustValue}
-          onClick={(event) => event.stopPropagation()}
-          onChange={(event) => onAdjustValueChange(Number(event.target.value) || 1)}
-        />
-      </label>
-      <div className="quick-quantity-actions">
-        <button onClick={(event) => { event.stopPropagation(); onAdjust(packageValue); }} title={`Добавить упаковку: ${formatNumber(packageValue)} ${item.unit}`}>
-          + упаковка
-        </button>
-        <button disabled={item.quantity <= 0} onClick={(event) => { event.stopPropagation(); onAdjust(-item.quantity); }} title="Списать остаток до нуля">
-          до 0
+        <button type="button" onClick={() => onAdjust(1)} title="Добавить одну">
+          <Plus size={19} />
         </button>
       </div>
-      <dl>
-        <div>
-          <dt>Минимум</dt>
-          <dd>
-            {formatNumber(item.minQuantity)} {item.unit}
-            {restock > 0 && <span className="restock">докупить {formatNumber(restock)} {item.unit}</span>}
-          </dd>
+
+      <div className="item-card-footer">
+        <span className={low ? 'stock-state low' : 'stock-state'}>
+          {low
+            ? `Пополнить на ${formatNumber(Math.max(0, item.targetQuantity - item.quantity))} ${item.unit}`
+            : `${item.balances.length} ${item.balances.length === 1 ? 'место' : 'места'}`}
+        </span>
+        <div className="item-menu">
+          <button
+            type="button"
+            className="icon-button"
+            aria-expanded={menuOpen}
+            aria-label="Действия с позицией"
+            onClick={() => setMenuOpen((value) => !value)}
+          >
+            <MoreVertical size={18} />
+          </button>
+          {menuOpen && (
+            <div className="item-menu-popover">
+              <button type="button" onClick={() => { onAdjust(packageValue); setMenuOpen(false); }}>
+                <PackagePlus size={17} /> Добавить упаковку
+              </button>
+              <button type="button" onClick={() => { onQr(); setMenuOpen(false); }}>
+                <QrCode size={17} /> QR-код
+              </button>
+              <button type="button" onClick={() => { onDuplicate(); setMenuOpen(false); }}>
+                <Copy size={17} /> Дублировать
+              </button>
+              <button className="danger-action" type="button" onClick={() => { onDelete(); setMenuOpen(false); }}>
+                <Trash2 size={17} /> Удалить
+              </button>
+            </div>
+          )}
         </div>
-        <div>
-          <dt>Места</dt>
-          <dd className="location-list">
-            {(itemLocations(item).length ? itemLocations(item) : ['Не указано']).map((location) => (
-              <span key={location}>
-                <MapPin size={13} />
-                {location}
-              </span>
-            ))}
-          </dd>
-        </div>
-      </dl>
-      {item.note && <p className="note">{item.note}</p>}
-      <div className="card-actions">
-        <button onClick={(event) => { event.stopPropagation(); onDuplicate(); }} title="Дублировать">
-          <PackagePlus size={17} />
-        </button>
-        <button onClick={(event) => { event.stopPropagation(); onQr(); }} title="QR-код позиции">
-          <QrCode size={17} />
-        </button>
-        <button onClick={(event) => { event.stopPropagation(); onDelete(); }} title="Удалить">
-          <Trash2 size={17} />
-        </button>
       </div>
     </article>
   );

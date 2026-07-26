@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { createBackup, openDatabase, withTransaction } from './database.mjs';
+import { runIntegrityCheck } from './maintenance.mjs';
 
 const temporaryDirectories = [];
 
@@ -32,7 +33,7 @@ afterEach(() => {
 describe('database foundation', () => {
   it('applies versioned migrations and enables foreign keys', () => {
     const { db } = createTestDatabase();
-    expect(db.prepare('SELECT count(*) AS count FROM schema_migrations').get().count).toBe(5);
+    expect(db.prepare('SELECT count(*) AS count FROM schema_migrations').get().count).toBe(8);
     expect(db.prepare('PRAGMA foreign_keys').get().foreign_keys).toBe(1);
     db.close();
   });
@@ -123,6 +124,13 @@ describe('database foundation', () => {
     const backup = new DatabaseSync(backupPath, { readOnly: true });
     expect(backup.prepare('SELECT count(*) AS count FROM items').get().count).toBe(1);
     backup.close();
+    db.close();
+  });
+
+  it('passes an explicit SQLite integrity check', () => {
+    const { db } = createTestDatabase();
+    insertItem(db);
+    expect(runIntegrityCheck(db)).toBe(true);
     db.close();
   });
 });

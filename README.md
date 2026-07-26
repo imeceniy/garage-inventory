@@ -8,34 +8,23 @@ disappear exactly when needed.
 
 ## Features
 
-- Password-protected web interface.
-- Card-based inventory view.
-- Add, edit, and delete inventory items.
-- Track quantity, unit, category, storage location, minimum stock, and notes.
-- Search by name, category, location, QR/barcode, project, or note.
-- Filter by category.
-- Filter by project or kit.
-- Filter by storage location.
-- Filter by tag or container.
-- Sort by name, stock level, quantity, location, or recent updates.
-- Show only items that need restocking.
-- Quick quantity actions with configurable per-item step values.
-- Undo for recent stock changes and deletes.
-- Operation history for additions, write-offs, creates, and manual quantity edits.
-- Long-lived per-item operation history in the edit popup.
-- Item or package photos stored directly with the item.
-- Client-side photo compression before saving.
-- QR/barcode text field for quick lookup.
-- Browser camera scanning for QR and supported barcodes when available over HTTPS.
-- QR code generation for items and containers.
-- Multiple storage locations per item.
-- Per-location and per-container stock balances with transfers between them.
-- Storage location and project editors for bulk rename/delete.
-- Tags with filtering and bulk rename/delete.
-- Container/box entities with their own QR codes.
-- Inventory sessions for checking actual stock and writing quantity corrections into history.
-- Card and compact list inventory views.
-- Printable shopping list for low-stock items.
+- Password login with an HttpOnly cookie session and login throttling.
+- Dedicated stock, container, project, stocktake, and shopping workspaces.
+- Compact card and list views with mobile bottom navigation.
+- Create, edit, soft-delete, and fully restore inventory items.
+- Typo-tolerant synonym search and domain filters.
+- Fast operations from an explicit default storage balance.
+- Undo without losing the item identity or balance distribution.
+- Unified journal for receipts, deductions, transfers, and stocktakes.
+- Cursor-ready global and per-item history.
+- Item dialog with overview, balances, history, and editing tabs.
+- Browser-compressed photos and thumbnails stored outside SQLite.
+- QR/barcode scanning and generation over HTTPS.
+- Per-location and per-container balances with transfers.
+- Normalized locations, tags, and many-to-many projects.
+- Step-by-step balance stocktakes applied only when a session closes.
+- Separate reorder points and target stock levels.
+- Printable shopping list calculated up to target stock.
 - Light and dark themes.
 - SQLite storage with no external database server.
 
@@ -48,6 +37,20 @@ disappear exactly when needed.
 - Node.js built-in `node:sqlite`
 
 Node.js 24 or newer is required because the backend uses `node:sqlite`.
+
+## Architecture
+
+- `src/api` contains the typed HTTP client.
+- `src/components` contains workspaces, dialogs, and domain controls.
+- `src/domain` contains inventory types and constants.
+- `server/repositories` performs batched SQLite reads without N+1 queries.
+- `server/services` owns transactional domain behavior.
+- `server/routes` isolates authentication and file HTTP concerns.
+- `server/database.mjs` owns ordered migrations and backups.
+
+`stock_balances` is the source of truth for quantities and physical locations.
+The total on `items` is maintained transactionally as a query cache. Projects
+and tags use normalized many-to-many relations.
 
 ## Local Setup
 
@@ -112,7 +115,8 @@ data/garage.sqlite
 The `data/` directory is intentionally ignored by git.
 
 Before migrations, every application start creates a consistent database copy in
-`data/backups/`. The latest 14 copies are retained by default. Create a manual
+`data/backups/`. The server also runs `PRAGMA integrity_check` and creates a
+backup daily. The latest 14 copies are retained by default. Create a manual
 backup with:
 
 ```bash
@@ -129,6 +133,9 @@ cp data/backups/garage-YYYYMMDD-HHMMSS-mmm.sqlite data/garage.sqlite
 rm -f data/garage.sqlite-wal data/garage.sqlite-shm
 pm2 start garage-inventory
 ```
+
+Photos and thumbnails are stored outside SQLite in `data/uploads/items/`.
+Existing base64 photos are migrated there automatically on first startup.
 
 ## Home Server Deployment
 
@@ -148,7 +155,8 @@ For persistent background execution, PM2 can be used:
 pm2 start npm --name garage-inventory -- start
 ```
 
-The app listens on the port from `.env`, for example:
+The app listens on the configured ports. When HTTPS is configured, the HTTP port
+permanently redirects to HTTPS:
 
 ```text
 http://192.168.1.82:8782
@@ -170,7 +178,7 @@ pm2 restart garage-inventory
 
 | Name | Required | Default | Description |
 | --- | --- | --- | --- |
-| `PORT` | No | `8782` | HTTP port for the Express server. |
+| `PORT` | No | `8782` | HTTP port; redirects when HTTPS is configured. |
 | `HTTPS_PORT` | No | - | Optional HTTPS port. Required for camera scanning from another device. |
 | `HTTPS_KEY` | No | - | Path to the HTTPS private key, relative to the project root. |
 | `HTTPS_CERT` | No | - | Path to the HTTPS certificate, relative to the project root. |
@@ -180,5 +188,5 @@ pm2 restart garage-inventory
 
 ## Notes
 
-This project is intended for a trusted home network or VPN. If exposing it to the
-public internet, put it behind HTTPS and consider adding stronger authentication.
+This project is intended for a trusted home network or VPN. HTTPS is required for
+the secure cookie session and camera access from another device.
