@@ -59,7 +59,9 @@ const httpsEnabled = Boolean(
   && fs.existsSync(httpsKeyPath)
   && fs.existsSync(httpsCertPath)
 );
-const secureCookies = httpsEnabled;
+const secureCookies = process.env.GARAGE_SECURE_COOKIES
+  ? process.env.GARAGE_SECURE_COOKIES === 'true'
+  : httpsEnabled;
 const { requireAuth, router: authRouter } = createAuth({ password, secureCookies });
 const { router: mediaRouter, staticMiddleware: uploadsStatic } = createMedia({ rootDir: runtimeRoot, requireAuth });
 const itemRepository = createItemRepository(db);

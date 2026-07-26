@@ -183,6 +183,7 @@ pm2 restart garage-inventory
 | `HTTPS_KEY` | No | - | Path to the HTTPS private key, relative to the project root. |
 | `HTTPS_CERT` | No | - | Path to the HTTPS certificate, relative to the project root. |
 | `GARAGE_PASSWORD` | Yes | - | Password required to enter the app. |
+| `GARAGE_SECURE_COOKIES` | No | Automatic | Explicit `Secure` cookie override for tests or a trusted TLS reverse proxy. |
 | `BACKUP_ON_START` | No | `true` | Create a consistent SQLite copy before startup migrations. |
 | `BACKUP_RETENTION` | No | `14` | Number of recent automatic backups to retain. |
 

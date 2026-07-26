@@ -12,6 +12,7 @@ beforeAll(async () => {
   process.env.GARAGE_PASSWORD = 'integration-test-password';
   process.env.GARAGE_RUNTIME_ROOT = rootDir;
   process.env.GARAGE_NO_LISTEN = 'true';
+  process.env.GARAGE_SECURE_COOKIES = 'false';
   process.env.BACKUP_ON_START = 'false';
   const server = await import('./index.mjs');
   db = server.db;
@@ -24,6 +25,7 @@ afterAll(() => {
   fs.rmSync(rootDir, { recursive: true, force: true });
   delete process.env.GARAGE_RUNTIME_ROOT;
   delete process.env.GARAGE_NO_LISTEN;
+  delete process.env.GARAGE_SECURE_COOKIES;
 });
 
 describe('inventory API', () => {
